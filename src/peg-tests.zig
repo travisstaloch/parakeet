@@ -3,7 +3,7 @@ const testing = std.testing;
 const pk = @import("parakeet");
 const peg = pk.peg;
 const parseString = peg.parseString;
-const Peg = peg.Peg;
+const Peg = @import("peg-parsers.zig");
 
 const talloc = testing.allocator;
 
