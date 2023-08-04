@@ -97,7 +97,7 @@ pub const range = ps.choice(.{ range1, chr_c.map(Charset.one) });
 
 pub const class = ps.char('[')
     .discardL(ps.manyUntil(range, ps.char(']')))
-    .map(Expr.initFn(.class))
+    .map(Expr.class)
     .discardR(ps.char(']'))
     .discardR(spacing);
 
@@ -153,11 +153,19 @@ pub const prefix = ps.seqMapAlloc(.{
     suffix,
 }, prefixFn);
 
-pub const sequence = ps.many1(prefix)
+/// Sequence <- Prefix (Prefix)* /
+pub const sequence = ps.choice(.{
+    ps.seqMap(.{ prefix, ps.many(prefix, .{}) }, Expr.initPlusRes),
+    ps.discardSeq(.{ spacing, ps.eos })
+        .discardL(ps.constant(pk.Input, @as(Expr.PlusRes, .{ Expr.empty, &.{} }))),
+})
     .mapAlloc(Expr.initFnAlloc(.seq));
 
-pub const expression = sequence
-    .sepBy1(ps.char('/').discardR(spacing))
+/// Expression <- Sequence (SLASH Sequence)*
+pub const expression = ps.seqMap(.{
+    sequence,
+    ps.char('/').discardR(spacing).discardL(sequence).many(.{}),
+}, Expr.initPlusRes)
     .mapAlloc(Expr.initFnAlloc(.alt));
 
 fn exprRef() ExprP {

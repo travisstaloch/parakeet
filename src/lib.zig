@@ -50,6 +50,10 @@ pub const Input = struct {
         return i.s[i.index..][0..len];
     }
 
+    pub fn sliceTo(i: Input, end: usize) []const u8 {
+        return i.s[i.index..end];
+    }
+
     pub fn advanceBy(i: Input, count: usize) Input {
         return .{ .s = i.s, .index = i.index + count };
     }
@@ -70,7 +74,7 @@ pub const Input = struct {
     pub fn format(i: Input, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         const r = i.rest();
         const len = @min(10, r.len);
-        try writer.print("{}/{} '{s}'", .{ i.index, i.s.len, r[0..len] });
+        try writer.print("{}/{} '{}'", .{ i.index, i.s.len, std.zig.fmtEscapes(r[0..len]) });
     }
 };
 
