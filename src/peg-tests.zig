@@ -51,6 +51,8 @@ test "peg expression" {
         \\    / "\\u{" hex+ "}"
         \\    / "\\" [nr\\t'"]
     );
+    // groups with a single child don't need to be grouped
+    try check(Peg.expression, "( !Prefix )*", "!Prefix*");
 }
 
 test "peg string literal" {
@@ -142,10 +144,14 @@ test "peg grammar" {
         \\Expr <- Factor ( [+\-] Factor )*
         \\Factor <- Term ( [*/] Term )*
     );
-    try check(
-        Peg.grammar,
-        "Sequence <- Prefix ( Prefix )* /",
-        "Sequence <- Prefix ( Prefix )*",
+    try check(Peg.grammar,
+        \\Sequence <-
+        \\      Prefix ( Prefix )*
+        \\    / 
+    ,
+        \\Sequence <-
+        \\      Prefix Prefix*
+        \\    / 
     );
     try checkSame(Peg.grammar,
         \\char_escape <-
@@ -157,4 +163,127 @@ test "peg grammar" {
         \\    / char_escape
         \\    / ascii_char_not_nl_slash_squote
     );
+}
+
+// TODO move to pattern-test.zig
+test "pattern with negated character classes" {
+    const pat = pk.peg.Pattern;
+    const rules_ast = comptime &.{
+        .{ "line_comment", pat.alt(&.{
+            pat.seq(&.{
+                pat.literal("//"),
+                pat.not(&pat.class(.{ .sets = &.{
+                    .{ .one = '!' },
+                    .{ .one = '/' },
+                } })),
+                pat.many(&pat.class(.{ .sets = &.{
+                    .{ .one = '\n' },
+                }, .negated = true })),
+            }),
+            pat.seq(&.{
+                pat.literal("////"),
+                pat.many(&pat.class(.{ .sets = &.{
+                    .{ .one = '\n' },
+                }, .negated = true })),
+            }),
+        }) },
+        .{ "skip", pat.many(&pat.group(&pat.alt(&.{
+            pat.class(.{ .sets = &.{
+                .{ .one = ' ' },
+                .{ .one = '\n' },
+            } }),
+            pat.nonterm("line_comment"),
+        }))) },
+        .{ "hex", pat.class(.{ .sets = &.{
+            .{ .range = .{ '0', '9' } },
+            .{ .range = .{ 'a', 'f' } },
+            .{ .range = .{ 'A', 'F' } },
+        } }) },
+        .{ "char_escape", pat.alt(&.{
+            pat.seq(&.{
+                pat.literal("\\x"),
+                pat.nonterm("hex"),
+                pat.nonterm("hex"),
+            }),
+            pat.seq(&.{
+                pat.literal("\\u{"),
+                pat.plus(&pat.nonterm("hex")),
+                pat.literal("}"),
+            }),
+            pat.seq(&.{
+                pat.literal("\\"),
+                pat.class(.{ .sets = &.{
+                    .{ .one = 'n' },
+                    .{ .one = 'r' },
+                    .{ .one = '\\' },
+                    .{ .one = 't' },
+                    .{ .one = '\'' },
+                    .{ .one = '"' },
+                } }),
+            }),
+        }) },
+        .{ "string_char", pat.alt(&.{
+            pat.nonterm("char_escape"),
+            pat.class(.{ .sets = &.{
+                .{ .one = '\\' },
+                .{ .one = '"' },
+                .{ .one = '\n' },
+            }, .negated = true }),
+        }) },
+        .{ "STRINGLITERALSINGLE", pat.seq(&.{
+            pat.literal("\""),
+            pat.many(&pat.nonterm("string_char")),
+            pat.literal("\""),
+            pat.nonterm("skip"),
+        }) },
+    };
+
+    const rules = std.ComptimeStringMap(pk.peg.Pattern, rules_ast);
+    const r = pk.peg.Pattern.parse(&rules, "STRINGLITERALSINGLE",
+        \\"str"
+    , .{});
+    try testing.expect(r.output == .ok);
+    try testing.expectEqualStrings(
+        \\"str"
+    , r.output.ok);
+}
+
+test "negated char class matches not char class" {
+    const _pat = comptime pk.peg.Pattern.class(.{
+        .sets = &.{
+            .{ .range = .{ 'a', 'z' } },
+            .{ .range = .{ 'A', 'Z' } },
+            .{ .range = .{ '0', '9' } },
+            .{ .one = '_' },
+        },
+    });
+    inline for (.{ true, false }) |negated| {
+        const pat = comptime pk.peg.Pattern.class(.{
+            .negated = negated,
+            .sets = _pat.class.sets,
+        });
+        const not_pat = if (negated)
+            comptime pk.peg.Pattern.not(&_pat)
+        else
+            _pat;
+
+        const rules = std.ComptimeStringMap(pk.peg.Pattern, .{.{ "c", pat }});
+        const expecteds = .{
+            .{ "a", .err },
+            .{ "z", .err },
+            .{ "A", .err },
+            .{ "Z", .err },
+            .{ "_", .err },
+            .{ ".", .ok },
+            .{ "\x00", .ok },
+            .{ "\xff", .ok },
+        };
+        inline for (expecteds) |expected| {
+            const r = pat.run(rules, "", pk.input(expected[0]), .{});
+            // std.debug.print("negated={} r={} expected={}\n", .{ negated, r, expected });
+            try testing.expect((r.output == expected[1]) == negated);
+            const r2 = not_pat.run(rules, "", pk.input(expected[0]), .{});
+            try testing.expect((r2.output == expected[1]) == negated);
+        }
+    }
 }
