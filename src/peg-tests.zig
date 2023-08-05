@@ -238,7 +238,7 @@ test "pattern with negated character classes" {
         }) },
     };
 
-    const rules = std.ComptimeStringMap(pk.peg.Pattern, rules_ast);
+    const rules = pk.util.ComptimeStringMap(pk.peg.Pattern, rules_ast);
     const r = pk.peg.Pattern.parse(&rules, "STRINGLITERALSINGLE",
         \\"str"
     , .{});
@@ -267,7 +267,7 @@ test "negated char class matches not char class" {
         else
             _pat;
 
-        const rules = std.ComptimeStringMap(pk.peg.Pattern, .{.{ "c", pat }});
+        const rules = pk.util.ComptimeStringMap(pk.peg.Pattern, .{.{ "c", pat }});
         const expecteds = .{
             .{ "a", .err },
             .{ "z", .err },

@@ -402,7 +402,7 @@ pub const Expr = union(enum) {
 };
 
 /// a data format similar to Expr for encoding parsers and running them
-/// on input with Pattern.parse() and run().  run() uses recursion.
+/// on input with Pattern.parse() and run().
 pub const Pattern = union(enum) {
     literal: []const u8,
     class: Expr.Class,

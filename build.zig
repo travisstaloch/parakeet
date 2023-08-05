@@ -3,21 +3,36 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    const options = b.addOptions();
+    // TODO remove this flag once its possible to construct and use a grammar map at runtime
+    const grammar = b.option([]const u8, "grammar", "which grammar to use. " ++
+        " must be either 'peg' or 'zig'") orelse "";
+    options.addOption([]const u8, "grammar", grammar);
+    const eql_naive = b.option(bool, "eql_naive", "use util.eqlNaive rather" ++
+        " than eqlFast for string eql comparisons.  used for benchmarking.") orelse false;
+    options.addOption(bool, "eql_naive", eql_naive);
+
     const parakeet_mod = b.addModule("parakeet", .{
         .source_file = .{ .path = "src/lib.zig" },
+        .dependencies = &.{
+            .{ .name = "build_options", .module = options.createModule() },
+        },
     });
 
-    const unit_tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/tests.zig" },
-        .target = target,
-        .optimize = optimize,
-    });
-    unit_tests.filter = "peg grammar";
-    unit_tests.addModule("parakeet", parakeet_mod);
-    const run_unit_tests = b.addRunArtifact(unit_tests);
-    run_unit_tests.has_side_effects = true;
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_unit_tests.step);
+    { // tests
+        const unit_tests = b.addTest(.{
+            .root_source_file = .{ .path = "src/tests.zig" },
+            .target = target,
+            .optimize = optimize,
+        });
+        unit_tests.filter = "peg grammar";
+        unit_tests.addModule("parakeet", parakeet_mod);
+        const run_unit_tests = b.addRunArtifact(unit_tests);
+        run_unit_tests.has_side_effects = true;
+        const test_step = b.step("test", "Run unit tests");
+        test_step.dependOn(&run_unit_tests.step);
+    }
 
     { // examples
         const example_file = b.option([]const u8, "example", "path to example file");
@@ -58,9 +73,5 @@ pub fn build(b: *std.Build) void {
         }
         const exe_run_step = b.step("run", "Run the peg parser");
         exe_run_step.dependOn(&exe_run.step);
-        const grammar = b.option([]const u8, "grammar", "which grammar to use. must be either 'peg' or 'zig'") orelse "";
-        const options = b.addOptions();
-        options.addOption([]const u8, "grammar", grammar);
-        exe.addOptions("build_options", options);
     }
 }

@@ -26,7 +26,7 @@ pub fn main() !void {
     const input = try file.readToEndAlloc(alloc, std.math.maxInt(u32));
     const stdout = std.io.getStdOut().writer();
 
-    const bg = @import("build_options").grammar;
+    const bg = pk.build_options.grammar;
     if (bg.len != 0) {
         const pg = if (comptime std.mem.eql(u8, bg, "peg"))
             @import("gen/peg.peg.zig")
@@ -34,7 +34,7 @@ pub fn main() !void {
             @import("gen/zig-grammar.y.zig")
         else
             unreachable;
-        const rules = std.ComptimeStringMap(peg.Pattern, pg.Rules(pk, .{ .eval_branch_quota = 8000 }));
+        const rules = pk.util.ComptimeStringMap(peg.Pattern, pg.Rules(pk, .{ .eval_branch_quota = 8000 }));
         const start = nextArg(&args) orelse
             usage("missing argument: <start>", .{});
         const r = peg.Pattern.parse(&rules, start, input, .{ .allocator = alloc });

@@ -3,6 +3,9 @@ const mem = std.mem;
 pub const FailingAllocator = @import("FailingAllocator.zig");
 pub const parsers = @import("parsers.zig");
 pub const peg = @import("peg.zig");
+pub const util = @import("util.zig");
+pub const build_options = @import("build_options");
+
 var failing_allocator_instance = FailingAllocator{};
 pub const failing_allocator = failing_allocator_instance.allocator();
 
@@ -68,7 +71,7 @@ pub const Input = struct {
 
     pub fn startsWith(i: Input, s: []const u8) bool {
         // TODO make s comptime and optimize
-        return mem.startsWith(u8, i.s[i.index..], s);
+        return util.startsWith(u8, i.s[i.index..], s);
     }
 
     pub fn format(i: Input, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
