@@ -405,7 +405,7 @@ pub const Expr = union(enum) {
 /// on input with Pattern.parse() and run().
 pub const Pattern = union(enum) {
     literal: []const u8,
-    class: Expr.Class,
+    class: *const Expr.Class,
     alt: []const Pattern,
     seq: []const Pattern,
     many: *const Pattern,
@@ -414,18 +414,22 @@ pub const Pattern = union(enum) {
     not: *const Pattern,
     amp: *const Pattern,
     group: *const Pattern,
-    nonterm: []const u8,
+    nonterm_id: usize,
     dot,
     eos,
     empty,
     anychar: []const u8,
+
+    comptime {
+        std.debug.assert(24 == @sizeOf(Pattern));
+    }
 
     pub const Tag = std.meta.Tag(Pattern);
 
     pub fn literal(payload: []const u8) Pattern {
         return .{ .literal = payload };
     }
-    pub fn class(payload: Expr.Class) Pattern {
+    pub fn class(payload: *const Expr.Class) Pattern {
         return .{ .class = payload };
     }
     pub fn alt(payload: []const Pattern) Pattern {
@@ -458,6 +462,9 @@ pub const Pattern = union(enum) {
     pub fn nonterm(payload: []const u8) Pattern {
         return .{ .nonterm = payload };
     }
+    pub fn nontermId(payload: usize) Pattern {
+        return .{ .nonterm_id = payload };
+    }
     pub fn dot() Pattern {
         return .dot;
     }
@@ -468,149 +475,164 @@ pub const Pattern = union(enum) {
         return .{ .anychar = payload };
     }
 
-    pub const ParseError = error{ ParseFailure, MissingRule };
+    pub const ParseError = error{ParseFailure};
     pub const Result = struct {
         input: pk.Input,
         output: Output,
 
         const Output = union(enum) {
             err: ParseError,
-            ok: []const u8,
+            // TODO perhaps change ok back to []const u8 now that run()
+            // 'returns' by out pointer
+            /// start and end indices for input.s
+            ok: [2]u32,
         };
 
         pub fn err(i: pk.Input) Result {
             return .{ .input = i, .output = .{ .err = error.ParseFailure } };
         }
-        pub fn ok(i: pk.Input, s: []const u8) Result {
+        pub fn ok(i: pk.Input, s: [2]u32) Result {
             return .{ .input = i, .output = .{ .ok = s } };
-        }
-        pub fn errWith(i: pk.Input, e: ParseError) Result {
-            return .{ .input = i, .output = .{ .err = e } };
         }
     };
 
     const debug = std.log.debug;
 
+    pub fn RunCtx(comptime Rules: type) type {
+        return struct {
+            in: pk.Input,
+            rules: Rules,
+            id: usize,
+
+            pub fn init(in: pk.Input, rules: Rules, id: usize) @This() {
+                return .{ .in = in, .rules = rules, .id = id };
+            }
+        };
+    }
+
     pub fn parse(
-        rules: anytype,
-        start_rule_name: []const u8,
+        comptime Rule: type,
+        rules: []const Rule,
+        start_rule_id: usize,
         input: []const u8,
         opts: pk.Options,
     ) Result {
-        var i = pk.input(input);
-        // defer debug("parse() start={s}", .{start_rule_name});
-        const pat = rules.get(start_rule_name) orelse
-            return Result.errWith(i, error.MissingRule);
-        return pat.run(rules, start_rule_name, i, opts);
+        _ = opts;
+        var in = pk.input(input);
+        const rule = rules[start_rule_id];
+        var ctx = RunCtx([]const Rule).init(in, rules, start_rule_id);
+        var result: Result = undefined;
+        rule[1].run(Rule, &ctx, &result);
+        return result;
     }
 
     pub fn run(
-        pat: *const Pattern,
-        rules: anytype,
-        rule_name: []const u8,
-        i: pk.Input,
-        opts: pk.Options,
-    ) Result {
-        switch (pat.*) {
-            .nonterm => |name| {
-                const p = rules.get(name) orelse
-                    return Result.errWith(i, error.MissingRule);
-                const r = p.run(rules, name, i, opts);
+        pat: Pattern,
+        comptime Rule: type,
+        ctx: *RunCtx([]const Rule),
+        res: *Result,
+    ) void {
+        const in = ctx.in;
+        switch (pat) {
+            .nonterm_id => |id| {
+                const p = ctx.rules[id][1];
+                const oldid = ctx.id;
+                defer ctx.id = oldid;
+                ctx.id = id;
+                p.run(Rule, ctx, res);
                 // if (r.output == .ok)
-                //     debug("{} - {} {s} ok depth={}/{}", .{ r.input, p, name });
-                return r;
+                //     debug("{} {} {s} ok", .{ r.input, p, name });
             },
             .literal => |s| {
-                return if (i.startsWith(s))
-                    Result.ok(i.advanceBy(s.len), i.sliceAssume(s.len))
+                res.* = if (in.startsWith(s))
+                    Result.ok(in.advanceBy(@intCast(s.len)), in.range(@intCast(s.len)))
                 else
-                    Result.err(i);
+                    Result.err(in);
             },
             .class => |klass| {
-                const ic = i.get(0) orelse return Result.err(i);
+                const ic = in.get(0) orelse {
+                    res.* = Result.err(in);
+                    return;
+                };
                 const err = for (klass.sets) |set| {
                     switch (set) {
-                        .one => |c| if ((c == ic))
+                        .one => |c| if (c == ic)
                             break klass.negated,
-                        .range => |ab| if ((ab[0] <= ic and ic <= ab[1]))
+                        .range => |ab| if (ic -% ab[0] < ab[1] -% ab[0] + 1)
                             break klass.negated,
                     }
                 } else !klass.negated;
-                return if (err)
-                    Result.err(i)
+                res.* = if (err)
+                    Result.err(in)
                 else
-                    Result.ok(i.advanceBy(1), i.sliceAssume(1));
+                    Result.ok(in.advanceBy(1), in.range(1));
             },
-            .dot => return if (i.hasCount(1))
-                Result.ok(i.advanceBy(1), i.sliceAssume(1))
+            .dot => res.* = if (in.hasCount(1))
+                Result.ok(in.advanceBy(1), in.range(1))
             else
-                Result.err(i),
-            .empty => return Result.ok(i, i.sliceAssume(0)),
+                Result.err(in),
+            .empty => res.* = Result.ok(in, in.range(0)),
             .anychar => @panic("TODO tag=anychar"),
             .seq => |pats| {
-                var ii = i;
-                for (pats) |*p| {
-                    const r = p.run(rules, rule_name, ii, opts);
-                    if (r.output == .err) return r;
-                    ii.index = r.input.index;
+                for (pats) |p| {
+                    p.run(Rule, ctx, res);
+                    if (res.output == .err) return;
+                    ctx.in.index = res.input.index;
                 }
-                return Result.ok(ii, i.sliceTo(ii.index));
+                res.* = Result.ok(ctx.in, in.rangeTo(ctx.in.index));
             },
             .alt => |pats| {
                 for (pats) |*p| {
-                    const r = p.run(rules, rule_name, i, opts);
-                    if (r.output == .ok) return r;
+                    ctx.in.index = in.index;
+                    p.run(Rule, ctx, res);
+                    if (res.output == .ok) return;
                 }
-                return Result.err(i);
+                res.* = Result.err(in);
             },
             .many => |p| {
-                var ii = i;
                 while (true) {
-                    const r = p.run(rules, rule_name, ii, opts);
-                    if (r.output == .err) break;
-                    ii.index = r.input.index;
+                    p.run(Rule, ctx, res);
+                    ctx.in.index = res.input.index;
+                    if (res.output == .err) break;
                 }
-                return Result.ok(ii, i.sliceTo(ii.index));
+                res.* = Result.ok(ctx.in, in.rangeTo(ctx.in.index));
             },
             .plus => |p| {
-                var ii = i;
-                const r = p.run(rules, rule_name, ii, opts);
-                ii.index = r.input.index;
-                if (r.output == .err) return r;
+                p.run(Rule, ctx, res);
+                ctx.in.index = res.input.index;
+                if (res.output == .err) return;
                 while (true) {
-                    const r2 = p.run(rules, rule_name, ii, opts);
-                    if (r2.output == .err) break;
-                    ii.index = r2.input.index;
+                    p.run(Rule, ctx, res);
+                    ctx.in.index = res.input.index;
+                    if (res.output == .err) break;
                 }
-                return Result.ok(ii, i.sliceTo(ii.index));
+                res.* = Result.ok(ctx.in, in.rangeTo(ctx.in.index));
             },
-            .group => |p| return p.run(rules, rule_name, i, opts),
+            .group => |p| p.run(Rule, ctx, res),
             .not => |p| {
-                const r = p.run(rules, rule_name, i, opts);
-                const rr = if (r.output == .ok)
-                    Result.err(i)
+                p.run(Rule, ctx, res);
+                ctx.in.index = in.index;
+                res.* = if (res.output == .ok)
+                    Result.err(in)
                 else
-                    Result.ok(i, i.sliceTo(r.input.index));
-                // std.debug.print("not rr={}\n", .{rr});
-                return rr;
+                    Result.ok(in, in.rangeTo(res.input.index));
             },
             .amp => |p| {
-                const r = p.run(rules, rule_name, i, opts);
-                return .{ .input = i, .output = r.output };
+                p.run(Rule, ctx, res);
+                ctx.in.index = in.index;
+                res.* = .{ .input = in, .output = res.output };
             },
-            .eos => return if (i.eos())
-                Result.ok(i, i.rest())
+            .eos => res.* = if (in.eos())
+                Result.ok(in, in.restRange())
             else
-                Result.err(i),
+                Result.err(in),
             .opt => |p| {
-                const r = p.run(rules, rule_name, i, opts);
-                return if (r.output == .err)
-                    Result.ok(i, i.sliceTo(r.input.index))
-                else
-                    r;
+                p.run(Rule, ctx, res);
+                if (res.output == .ok) return;
+                ctx.in.index = in.index;
+                res.* = Result.ok(in, in.range(0));
             },
         }
-        unreachable;
     }
 
     pub fn format(
@@ -637,8 +659,6 @@ pub const Pattern = union(enum) {
         }
     }
 };
-
-pub const Rule = struct { []const u8, Pattern };
 
 pub fn parseString(
     p: anytype,
