@@ -112,7 +112,7 @@ test "fail" {
 test "eos" {
     const r = ps.eos.run(foobar, .{});
     try testing.expectEqual(parse_failure, r.output.err);
-    try testing.expectEqualStrings(foobar.s, r.input.rest());
+    try testing.expectEqualStrings(foobar.rest(), r.input.rest());
     try testing.expectEqual(false, ps.iseos.run(foobar, .{}).output.ok);
     try testing.expectEqual({}, ps.eos.run(empty, .{}).output.ok);
     try testing.expectEqual(true, ps.iseos.run(empty, .{}).output.ok);
@@ -124,7 +124,7 @@ test "forward" {
 }
 
 test "backward" {
-    const in = pk.Input{ .s = "abc", .index = 1 };
+    const in = pk.Input{ .s = "abc", .index = 1, .len = 3 };
     try testing.expectEqual(@as(usize, 0), ps.backward(1).run(in, .{}).input.index);
     try testing.expectEqual(parse_failure, ps.backward(2).run(in, .{}).output.err);
 }
@@ -138,7 +138,7 @@ test "length" {
 }
 
 test "char" {
-    try expectResultChar(error.ParseFailure, char('a').run(foobar, .{}), foobar.s);
+    try expectResultChar(error.ParseFailure, char('a').run(foobar, .{}), foobar.rest());
     try expectResultChar(error.ParseFailure, char('a').run(empty, .{}), "");
     try expectResultChar('f', char('f').run(input("f"), .{}), "");
     try expectResultChar('f', char('f').run(foobar, .{}), "oobar");
@@ -153,45 +153,45 @@ const isalpha = std.ascii.isAlphabetic;
 const isdigit = std.ascii.isDigit;
 
 test "satisfy" {
-    try expectResultChar(error.ParseFailure, satisfy(isdigit).run(foobar, .{}), foobar.s);
+    try expectResultChar(error.ParseFailure, satisfy(isdigit).run(foobar, .{}), foobar.rest());
     try expectResultChar(error.ParseFailure, satisfy(isdigit).run(empty, .{}), "");
     try expectResultChar('f', satisfy(isalpha).run(input("f"), .{}), "");
     try expectResultChar('f', satisfy(isalpha).run(foobar, .{}), "oobar");
 }
 
 test "charRange" {
-    try expectResultChar(error.ParseFailure, charRange('0', '9').run(foobar, .{}), foobar.s);
+    try expectResultChar(error.ParseFailure, charRange('0', '9').run(foobar, .{}), foobar.rest());
     try expectResultChar(error.ParseFailure, charRange('0', '9').run(empty, .{}), "");
     try expectResultChar('f', charRange('a', 'z').run(input("f"), .{}), "");
     try expectResultChar('f', charRange('a', 'z').run(foobar, .{}), "oobar");
 }
 
 test "anycharIn" {
-    try expectResultChar(error.ParseFailure, ps.anycharIn(&.{}).run(foobar, .{}), foobar.s);
+    try expectResultChar(error.ParseFailure, ps.anycharIn(&.{}).run(foobar, .{}), foobar.rest());
     try expectResultChar(error.ParseFailure, ps.anycharIn(&.{'0'}).run(empty, .{}), "");
     try expectResultChar('f', ps.anycharIn(&.{ 'f', 'z' }).run(input("f"), .{}), "");
     try expectResultChar('f', ps.anycharIn(&.{ 'f', 'z' }).run(foobar, .{}), "oobar");
 }
 
 test "anycharNotIn" {
-    try expectResultChar(error.ParseFailure, ps.anycharNotIn(&.{'f'}).run(foobar, .{}), foobar.s);
+    try expectResultChar(error.ParseFailure, ps.anycharNotIn(&.{'f'}).run(foobar, .{}), foobar.rest());
     try expectResultChar(error.ParseFailure, ps.anycharNotIn(&.{}).run(empty, .{}), "");
     try expectResultChar('f', ps.anycharNotIn(&.{ 'a', 'b' }).run(input("f"), .{}), "");
     try expectResultChar('f', ps.anycharNotIn(&.{ 'a', 'b' }).run(foobar, .{}), "oobar");
 }
 
 test "str" {
-    try expectResultStr(error.ParseFailure, str("a").run(foobar, .{}), foobar.s);
+    try expectResultStr(error.ParseFailure, str("a").run(foobar, .{}), foobar.rest());
     try expectResultStr(error.ParseFailure, str("a").run(empty, .{}), "");
     try expectResultStr("f", str("f").run(input("f"), .{}), "");
     try expectResultStr("f", str("f").run(foobar, .{}), "oobar");
 }
 
 test "takeWhileFn" {
-    try expectResultStr("", takeWhileFn(isdigit, .{}).run(foobar, .{}), foobar.s);
-    try expectResultStr(foobar.s, takeWhileFn(isalpha, .{}).run(foobar, .{}), "");
+    try expectResultStr("", takeWhileFn(isdigit, .{}).run(foobar, .{}), foobar.rest());
+    try expectResultStr(foobar.rest(), takeWhileFn(isalpha, .{}).run(foobar, .{}), "");
     try expectResultStr("foo", takeWhileFn(isalpha, .{ .max = 3 }).run(foobar, .{}), "bar");
-    try expectResultStr(foobar.s, takeWhileFn(isalpha, .{ .max = 7 }).run(foobar, .{}), "");
+    try expectResultStr(foobar.rest(), takeWhileFn(isalpha, .{ .max = 7 }).run(foobar, .{}), "");
     {
         const s = "01ab";
         try expectResultStr(error.ParseFailure, takeWhileFn(isdigit, .{ .min = 3 }).run(input(s), .{}), "ab");
@@ -200,10 +200,10 @@ test "takeWhileFn" {
 }
 
 test "takeWhile" {
-    try expectResultStr("", (comptime satisfy(isdigit).takeWhile(.{})).run(foobar, .{}), foobar.s);
-    try expectResultStr(foobar.s, takeWhile(any(2), .{}).run(foobar, .{}), "");
+    try expectResultStr("", (comptime satisfy(isdigit).takeWhile(.{})).run(foobar, .{}), foobar.rest());
+    try expectResultStr(foobar.rest(), takeWhile(any(2), .{}).run(foobar, .{}), "");
     try expectResultStr("foo", takeWhile(satisfy(isalpha), .{ .max = 3 }).run(foobar, .{}), "bar");
-    try expectResultStr(foobar.s, takeWhile(satisfy(isalpha), .{ .max = 7 }).run(foobar, .{}), "");
+    try expectResultStr(foobar.rest(), takeWhile(satisfy(isalpha), .{ .max = 7 }).run(foobar, .{}), "");
     {
         const s = "01ab";
         try expectResultStr(error.ParseFailure, takeWhile(satisfy(isdigit), .{ .min = 3 }).run(input(s), .{}), "ab");
@@ -212,10 +212,10 @@ test "takeWhile" {
 }
 
 test "takeUntilFn" {
-    try expectResultStr(foobar.s, takeUntilFn(isdigit, .{}).run(foobar, .{}), "");
-    try expectResultStr("", takeUntilFn(isalpha, .{}).run(foobar, .{}), foobar.s);
+    try expectResultStr(foobar.rest(), takeUntilFn(isdigit, .{}).run(foobar, .{}), "");
+    try expectResultStr("", takeUntilFn(isalpha, .{}).run(foobar, .{}), foobar.rest());
     try expectResultStr("foo", takeUntilFn(isdigit, .{ .max = 3 }).run(foobar, .{}), "bar");
-    try expectResultStr(foobar.s, takeUntilFn(isdigit, .{ .max = 7 }).run(foobar, .{}), "");
+    try expectResultStr(foobar.rest(), takeUntilFn(isdigit, .{ .max = 7 }).run(foobar, .{}), "");
     {
         const s = "01ab";
         try expectResultStr(error.ParseFailure, takeUntilFn(isalpha, .{ .min = 3 }).run(input(s), .{}), "ab");
@@ -224,10 +224,10 @@ test "takeUntilFn" {
 }
 
 test "takeUntil" {
-    try expectResultStr(foobar.s, (comptime satisfy(isdigit).takeUntil(.{})).run(foobar, .{}), "");
-    try expectResultStr("", takeUntil(satisfy(isalpha), .{}).run(foobar, .{}), foobar.s);
+    try expectResultStr(foobar.rest(), (comptime satisfy(isdigit).takeUntil(.{})).run(foobar, .{}), "");
+    try expectResultStr("", takeUntil(satisfy(isalpha), .{}).run(foobar, .{}), foobar.rest());
     try expectResultStr("foo", takeUntil(satisfy(isdigit), .{ .max = 3 }).run(foobar, .{}), "bar");
-    try expectResultStr(foobar.s, takeUntil(satisfy(isdigit), .{ .max = 7 }).run(foobar, .{}), "");
+    try expectResultStr(foobar.rest(), takeUntil(satisfy(isdigit), .{ .max = 7 }).run(foobar, .{}), "");
     {
         const s = "01ab";
         try expectResultStr(error.ParseFailure, takeUntil(satisfy(isalpha), .{ .min = 3 }).run(input(s), .{}), "ab");
@@ -240,7 +240,7 @@ test "seq" {
         const p = comptime seq(.{ char('a'), char('b') });
         const r = p.run(foobar, .{});
         try testing.expectEqual(parse_failure, r.output.err);
-        try testing.expectEqualStrings(foobar.s, r.input.rest());
+        try testing.expectEqualStrings(foobar.rest(), r.input.rest());
         try testing.expectEqual(parse_failure, p.run(empty, .{}).output.err);
     }
     {
@@ -285,7 +285,7 @@ test "seq" {
 test "choice" {
     {
         const p = choice(.{ char('a'), char('b') });
-        try expectResultChar(error.ParseFailure, p.run(foobar, .{}), foobar.s);
+        try expectResultChar(error.ParseFailure, p.run(foobar, .{}), foobar.rest());
         try testing.expectEqual(parse_failure, p.run(empty, .{}).output.err);
     }
     {
@@ -303,7 +303,7 @@ test "choice" {
 test "discardR / <*" {
     {
         const p = comptime str("a").@"<*"(str("b"));
-        try expectResultStr(error.ParseFailure, p.run(foobar, .{}), foobar.s);
+        try expectResultStr(error.ParseFailure, p.run(foobar, .{}), foobar.rest());
         try expectResultStr(error.ParseFailure, p.run(empty, .{}), "");
     }
     {
@@ -325,7 +325,7 @@ test "discardR / <*" {
 test "discardL / *>" {
     {
         const p = comptime str("a").@"*>"(str("b"));
-        try expectResultStr(error.ParseFailure, p.run(foobar, .{}), foobar.s);
+        try expectResultStr(error.ParseFailure, p.run(foobar, .{}), foobar.rest());
         try expectResultStr(error.ParseFailure, p.run(empty, .{}), "");
     }
     {
@@ -507,7 +507,7 @@ test "int" {
                             error.ParseFailure => try testing.expect(i == -1 and signedness == .unsigned),
                             else => return error.UnexpectedResult,
                         }
-                        try testing.expectEqualStrings(in.s, r.input.rest());
+                        try testing.expectEqualStrings(in.rest(), r.input.rest());
                     }
                 }
             }
@@ -604,7 +604,7 @@ test "many" {
         const r = p.run(foobar, .{ .allocator = talloc });
         const output = r.output.ok;
         defer talloc.free(output);
-        try testing.expectEqualStrings(foobar.s, output);
+        try testing.expectEqualStrings(foobar.rest(), output);
     }
 }
 
@@ -629,9 +629,9 @@ test "until" {
 
 test "output" {
     try expectResultStr("foo", ps.option(str("foo")).run(foobar, .{}), "bar");
-    try expectResultStr("", ps.option(str("bar")).run(foobar, .{}), foobar.s);
+    try expectResultStr("", ps.option(str("bar")).run(foobar, .{}), foobar.rest());
     try expectResultStr("f", ps.option(char('f')).run(foobar, .{}), "oobar");
-    try expectResultStr("", ps.option(char('b')).run(foobar, .{}), foobar.s);
+    try expectResultStr("", ps.option(char('b')).run(foobar, .{}), foobar.rest());
 }
 
 test "sepBy" {
@@ -690,20 +690,20 @@ test "peekChar" {
 }
 
 test "peekCharFail" {
-    try expectResultChar('f', ps.peekCharFail.run(foobar, .{}), foobar.s);
+    try expectResultChar('f', ps.peekCharFail.run(foobar, .{}), foobar.rest());
     try expectResultChar(error.ParseFailure, ps.peekCharFail.run(empty, .{}), "");
 }
 
 test "peekString" {
-    try expectResultStr("f", ps.peekString(1).run(foobar, .{}), foobar.s);
-    try expectResultStr(error.ParseFailure, ps.peekString(7).run(foobar, .{}), foobar.s);
+    try expectResultStr("f", ps.peekString(1).run(foobar, .{}), foobar.rest());
+    try expectResultStr(error.ParseFailure, ps.peekString(7).run(foobar, .{}), foobar.rest());
     try expectResultStr(error.ParseFailure, ps.peekString(1).run(empty, .{}), "");
 }
 
 test "peek" {
-    try expectResultStr("foo", ps.peek(any(3)).run(foobar, .{}), foobar.s);
-    try expectResultStr(foobar.s, ps.peek(any(6)).run(foobar, .{}), foobar.s);
-    try expectResultStr(error.ParseFailure, ps.peek(any(7)).run(foobar, .{}), foobar.s);
+    try expectResultStr("foo", ps.peek(any(3)).run(foobar, .{}), foobar.rest());
+    try expectResultStr(foobar.rest(), ps.peek(any(6)).run(foobar, .{}), foobar.rest());
+    try expectResultStr(error.ParseFailure, ps.peek(any(7)).run(foobar, .{}), foobar.rest());
     try expectResultChar(error.ParseFailure, ps.peek(anychar).run(empty, .{}), "");
 }
 

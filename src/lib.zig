@@ -29,60 +29,69 @@ pub fn checkRunTime(comptime message: []const u8, comptime note: []const u8) voi
 }
 
 pub const Input = struct {
-    s: []const u8,
-    index: usize = 0,
+    s: [*]const u8,
+    len: u32,
+    index: u32 = 0,
 
-    pub fn hasCount(i: Input, count: usize) bool {
-        return i.index + count < i.s.len;
+    pub fn hasCount(i: Input, count: u32) bool {
+        return i.index + count < i.len;
     }
 
-    pub fn getAssume(i: Input, offset: usize) u8 {
+    pub fn getAssume(i: Input, offset: u32) u8 {
         return i.s[i.index + offset];
     }
 
-    pub fn get(i: Input, offset: usize) ?u8 {
-        if (i.index + offset >= i.s.len) return null;
+    pub fn get(i: Input, offset: u32) ?u8 {
+        if (i.index + offset >= i.len) return null;
         return i.getAssume(offset);
     }
 
-    pub fn hasSliceCount(i: Input, count: usize) bool {
-        return i.index + count <= i.s.len;
+    pub fn hasSliceCount(i: Input, count: u32) bool {
+        return i.index + count <= i.len;
     }
 
-    pub fn sliceAssume(i: Input, len: usize) []const u8 {
+    pub fn sliceAssume(i: Input, len: u32) []const u8 {
         return i.s[i.index..][0..len];
     }
 
-    pub fn sliceTo(i: Input, end: usize) []const u8 {
-        return i.s[i.index..end];
-    }
-
-    pub fn advanceBy(i: Input, count: usize) Input {
-        return .{ .s = i.s, .index = i.index + count };
+    pub fn advanceBy(i: Input, count: u32) Input {
+        return .{ .s = i.s, .len = i.len, .index = i.index + count };
     }
 
     pub fn rest(i: Input) []const u8 {
-        return i.s[i.index..];
+        return i.s[i.index..i.len];
+    }
+
+    pub fn restRange(i: Input) [2]u32 {
+        return .{ i.index, i.len };
+    }
+
+    pub fn range(i: Input, len: u32) [2]u32 {
+        return .{ i.index, i.index + len };
+    }
+
+    pub fn rangeTo(i: Input, index: u32) [2]u32 {
+        return .{ i.index, index };
     }
 
     pub fn eos(i: Input) bool {
-        return i.index >= i.s.len;
+        return i.index >= i.len;
     }
 
     pub fn startsWith(i: Input, s: []const u8) bool {
         // TODO make s comptime and optimize
-        return util.startsWith(u8, i.s[i.index..], s);
+        return util.startsWith(u8, i.s[i.index..i.len], s);
     }
 
     pub fn format(i: Input, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         const r = i.rest();
         const len = @min(10, r.len);
-        try writer.print("{}/{} '{}'", .{ i.index, i.s.len, std.zig.fmtEscapes(r[0..len]) });
+        try writer.print("{}/{} '{}'", .{ i.index, i.len, std.zig.fmtEscapes(r[0..len]) });
     }
 };
 
 pub fn input(s: []const u8) Input {
-    return .{ .s = s };
+    return .{ .s = s.ptr, .len = @intCast(s.len) };
 }
 
 pub const ParseError = error{ ParseFailure, AllocatorRequired } || mem.Allocator.Error;

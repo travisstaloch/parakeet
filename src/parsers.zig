@@ -113,7 +113,7 @@ pub const index = Parser(Input, usize){
 pub const length = Parser(Input, usize){
     .runFn = struct {
         fn run(_: UsizeParser, i: Input, _: Options) UsizeParser.Result {
-            return UsizeParser.ok(i, i.s.len - i.index, .{});
+            return UsizeParser.ok(i, i.len - i.index, .{});
         }
     }.run,
     .fail_handler = default_fail_handler,
@@ -146,7 +146,8 @@ pub fn backward(comptime count: usize) VoidParser {
                 return if (i.index >= count)
                     VoidParser.ok(.{
                         .s = i.s,
-                        .index = i.index - count,
+                        .index = i.index - @as(u32, @intCast(count)),
+                        .len = i.len,
                     }, {}, .{})
                 else
                     VoidParser.err(i, .{});
@@ -298,7 +299,7 @@ pub const all = StringParser{
     .runFn = struct {
         fn run(_: StringParser, i: Input, _: Options) StringParser.Result {
             const rest = i.rest();
-            return StringParser.ok(i.advanceBy(rest.len), rest, .{});
+            return StringParser.ok(i.advanceBy(@intCast(rest.len)), rest, .{});
         }
     }.run,
     .fail_handler = default_fail_handler,
@@ -330,7 +331,7 @@ pub fn takeWhileFn(
     return .{
         .runFn = struct {
             fn run(_: StringParser, i: Input, _: Options) StringParser.Result {
-                var count: usize = 0;
+                var count: u32 = 0;
                 while (i.hasCount(count) and count < byte_limits.max) : (count += 1) {
                     const c = i.getAssume(count);
                     if (!f(c)) break;
@@ -396,7 +397,7 @@ pub fn takeUntilFn(
     return .{
         .runFn = struct {
             fn run(_: StringParser, i: Input, _: Options) StringParser.Result {
-                var count: usize = 0;
+                var count: u32 = 0;
                 while (i.hasCount(count) and
                     count < byte_limits.max) : (count += 1)
                 {
@@ -434,7 +435,7 @@ pub fn takeUntil(
     return .{
         .runFn = struct {
             fn run(_: StringParser, i: Input, opts: Options) StringParser.Result {
-                var count: usize = 0;
+                var count: u32 = 0;
                 while (i.hasCount(count) and
                     count < byte_limits.max) : (count += 1)
                 {
@@ -556,7 +557,7 @@ pub fn seq(comptime ps: anytype) Seq(ps) {
                             os[j] = r.output.ok;
                         j += 1;
                     }
-                    // std.log.debug("seq ii={}+{}/{} r={}", .{ ii.index, ii.outer_index, ii.s.len, r });
+                    // std.log.debug("seq ii={}+{}/{} r={}", .{ ii.index, ii.outer_index, ii.len, r });
                     imut = imut.advanceBy(r.input.index - imut.index);
                 }
                 return P.ok(imut, os, .{});
@@ -1210,7 +1211,7 @@ pub fn scan(
         .runFn = struct {
             fn run(_: P, i: Input, _: Options) P.Result {
                 const start = i.index;
-                if (start >= i.s.len) return P.err(i, .{});
+                if (start >= i.len) return P.err(i, .{});
                 var imut = i;
                 var state = init_state;
                 while (imut.get(0)) |c| {

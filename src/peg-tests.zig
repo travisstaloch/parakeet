@@ -36,10 +36,10 @@ test "peg expression" {
     try checkSame(Peg.expression, "&id1");
     try checkSame(Peg.expression, "!id1");
     try checkSame(Peg.expression, "&id1?");
-    try checkSame(Peg.expression, "( id1 )");
-    try checkSame(Peg.expression, "( id1 )*");
+    try check(Peg.expression, "( id1 )", "id1");
+    try check(Peg.expression, "( id1 )*", "id1*");
     try checkSame(Peg.expression, "id1 ( id1 / id3 )*");
-    try checkSame(Peg.expression, "( &id1? )");
+    try check(Peg.expression, "( &id1? )", "&id1?");
     try checkSame(Peg.expression, "id1 id2");
     try checkSame(Peg.expression, "id1\n    / id2");
     try checkSame(Peg.expression, "id1\n    / id2 id3");
@@ -245,7 +245,7 @@ test "pattern with negated character classes" {
     try testing.expect(r.output == .ok);
     try testing.expectEqualStrings(
         \\"str"
-    , r.output.ok);
+    , r.input.s[r.output.ok[0]..r.output.ok[1]]);
 }
 
 test "negated char class matches not char class" {

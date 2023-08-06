@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
-        unit_tests.filter = "peg grammar";
+        // unit_tests.filter = "peg grammar";
         unit_tests.addModule("parakeet", parakeet_mod);
         const run_unit_tests = b.addRunArtifact(unit_tests);
         run_unit_tests.has_side_effects = true;
