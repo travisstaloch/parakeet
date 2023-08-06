@@ -34,11 +34,21 @@ pub fn main() !void {
             @import("gen/zig-grammar.y.zig")
         else
             unreachable;
-        const rules = pk.util.ComptimeStringMap(peg.Pattern, pg.Rules(pk, .{ .eval_branch_quota = 8000 }));
+        const opts = .{ .eval_branch_quota = 2000 };
+        const G = pg.Grammar(pk, opts);
         const start = nextArg(&args) orelse
             usage("missing argument: <start>", .{});
-        const r = peg.Pattern.parse(&rules, start, input, .{ .allocator = alloc });
+        const start_id = std.meta.stringToEnum(G.RuleType, start) orelse
+            usage("invalid start rule name '{s}'", .{start});
+        const r = peg.Pattern.parse(
+            G.Rule,
+            &G.rules,
+            @intFromEnum(start_id),
+            input,
+            .{ .allocator = alloc },
+        );
         try stdout.print("parse {s} input={}\n", .{ @tagName(r.output), r.input });
+        if (r.output == .err) std.os.exit(1);
     } else {
         const g = try peg.parseString(Peg.grammar, input, alloc);
         try stdout.print("{}\n", .{g.fmtGen()});

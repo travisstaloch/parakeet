@@ -302,28 +302,44 @@ pub const Expr = union(enum) {
         switch (e) {
             .grammar => |ds| {
                 _ = try writer.write(
-                    \\pub inline fn Rules(
+                    \\pub fn Grammar(
                     \\    comptime pk: type,
                     \\    comptime options: struct { eval_branch_quota: usize = 1000 },
-                    \\) []const pk.peg.Rule {
-                    \\    @setEvalBranchQuota(options.eval_branch_quota);
-                    \\    const pat = pk.peg.Pattern;
-                    \\    return comptime &.{
+                    \\) type {
+                    \\    return struct {
+                    \\    pub const Rule = struct{RuleType, pk.peg.Pattern};
+                    \\    pub const RuleType = enum {
                     \\
                 );
                 for (ds) |d| {
-                    _ = try writer.write(".{ \"");
                     _ = try writer.write(d[0]);
-                    _ = try writer.write("\", ");
+                    _ = try writer.write(",\n");
+                }
+                _ = try writer.write(
+                    \\
+                    \\};
+                    \\    const pat = pk.peg.Pattern;
+                    \\    const n = @typeInfo(RuleType).Enum.fields.len;
+                    \\    fn _rules() [n]Rule {
+                    \\    @setEvalBranchQuota(options.eval_branch_quota);
+                    \\    return [_]Rule{
+                    \\
+                );
+                for (ds) |d| {
+                    try writer.print(".{{ .{s}, ", .{d[0]});
                     try d[1].formatGenImpl(writer, depth);
                     _ = try writer.write("},\n");
                 }
-                _ = try writer.write("};}\n");
+                _ = try writer.write(
+                    \\};
+                    \\}
+                    \\    pub const rules = _rules();
+                    \\};
+                    \\}
+                );
             },
             .ident => |s| {
-                _ = try writer.write("pat.nonterm(\"");
-                _ = try writer.write(s);
-                _ = try writer.write("\")");
+                try writer.print("pat.nontermId(@intFromEnum(RuleType.{s}))", .{s});
             },
             .litS, .litD => |s| {
                 _ = try writer.write("pat.literal(\"");
@@ -331,7 +347,7 @@ pub const Expr = union(enum) {
                 _ = try writer.write("\")");
             },
             .class => |klass| {
-                _ = try writer.write("pat.class(.{.sets = &.{");
+                _ = try writer.write("pat.class(&.{.sets = &.{");
                 // TODO optimize. if if all .one, use Pattern.anychar
                 for (klass.sets) |c| {
                     switch (c) {
