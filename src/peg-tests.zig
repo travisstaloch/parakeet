@@ -168,21 +168,23 @@ test "peg grammar" {
 // TODO move to pattern-test.zig
 test "pattern with negated character classes" {
     const pat = pk.peg.Pattern;
-    const RuleType = enum { line_comment, skip, hex, char_escape, string_char, STRINGLITERALSINGLE };
-    const Rule = struct { RuleType, pk.peg.Pattern };
     // zig fmt: off
-    const rules = comptime [_]Rule{
-        .{ .line_comment, pat.alt(&.{pat.seq(&.{pat.literal("//"), pat.not(&pat.class(&.{.sets = &.{.{.one='!'}, .{.one='/'}, }})), pat.many(&pat.class(&.{.sets = &.{.{.one='\n'}, },.negated = true})), }), pat.seq(&.{pat.literal("////"), pat.many(&pat.class(&.{.sets = &.{.{.one='\n'}, },.negated = true})), }), })},
-        .{ .skip, pat.many(&pat.group(&pat.alt(&.{pat.class(&.{.sets = &.{.{.one=' '}, .{.one='\n'}, }}), pat.nontermId(@intFromEnum(RuleType.line_comment)), })))},
-        .{ .hex, pat.class(&.{.sets = &.{.{.range=.{'0', '9'}}, .{.range=.{'a', 'f'}}, .{.range=.{'A', 'F'}}, }})},
-        .{ .char_escape, pat.alt(&.{pat.seq(&.{pat.literal("\\x"), pat.nontermId(@intFromEnum(RuleType.hex)), pat.nontermId(@intFromEnum(RuleType.hex)), }), pat.seq(&.{pat.literal("\\u{"), pat.plus(&pat.nontermId(@intFromEnum(RuleType.hex))), pat.literal("}"), }), pat.seq(&.{pat.literal("\\"), pat.class(&.{.sets = &.{.{.one='n'}, .{.one='r'}, .{.one='\\'}, .{.one='t'}, .{.one='\''}, .{.one='"'}, }}), }), })},
-        .{ .string_char, pat.alt(&.{pat.nontermId(@intFromEnum(RuleType.char_escape)), pat.class(&.{.sets = &.{.{.one='\\'}, .{.one='"'}, .{.one='\n'}, },.negated = true}), })},
-        .{ .STRINGLITERALSINGLE, pat.seq(&.{pat.literal("\""), pat.many(&pat.nontermId(@intFromEnum(RuleType.string_char))), pat.literal("\""), pat.nontermId(@intFromEnum(RuleType.skip)), })},
+    const G = struct{
+        pub const NonTerminal = enum { line_comment, skip, hex, char_escape, string_char, STRINGLITERALSINGLE };
+        pub const Rule = struct { NonTerminal, pk.peg.Pattern };
+        pub const rules = [_]Rule{
+            .{ .line_comment, pat.alt(&.{pat.seq(&.{pat.literal("//"), pat.not(&pat.class(&.{.sets = &.{.{.one='!'}, .{.one='/'}, }})), pat.many(&pat.class(&.{.sets = &.{.{.one='\n'}, },.negated = true})), }), pat.seq(&.{pat.literal("////"), pat.many(&pat.class(&.{.sets = &.{.{.one='\n'}, },.negated = true})), }), })},
+            .{ .skip, pat.many(&pat.group(&pat.alt(&.{pat.class(&.{.sets = &.{.{.one=' '}, .{.one='\n'}, }}), pat.nontermId(@intFromEnum(NonTerminal.line_comment)), })))},
+            .{ .hex, pat.class(&.{.sets = &.{.{.range=.{'0', '9'}}, .{.range=.{'a', 'f'}}, .{.range=.{'A', 'F'}}, }})},
+            .{ .char_escape, pat.alt(&.{pat.seq(&.{pat.literal("\\x"), pat.nontermId(@intFromEnum(NonTerminal.hex)), pat.nontermId(@intFromEnum(NonTerminal.hex)), }), pat.seq(&.{pat.literal("\\u{"), pat.plus(&pat.nontermId(@intFromEnum(NonTerminal.hex))), pat.literal("}"), }), pat.seq(&.{pat.literal("\\"), pat.class(&.{.sets = &.{.{.one='n'}, .{.one='r'}, .{.one='\\'}, .{.one='t'}, .{.one='\''}, .{.one='"'}, }}), }), })},
+            .{ .string_char, pat.alt(&.{pat.nontermId(@intFromEnum(NonTerminal.char_escape)), pat.class(&.{.sets = &.{.{.one='\\'}, .{.one='"'}, .{.one='\n'}, },.negated = true}), })},
+            .{ .STRINGLITERALSINGLE, pat.seq(&.{pat.literal("\""), pat.many(&pat.nontermId(@intFromEnum(NonTerminal.string_char))), pat.literal("\""), pat.nontermId(@intFromEnum(NonTerminal.skip)), })},
+        };
     };
     // zig fmt: on
-    const r = pk.peg.Pattern.parse(Rule, &rules, @intFromEnum(RuleType.STRINGLITERALSINGLE),
+    const r = pk.peg.Pattern.parse(G, @intFromEnum(G.NonTerminal.STRINGLITERALSINGLE),
         \\"str"
-    , .{});
+    , .{ .allocator = talloc });
     try testing.expect(r.output == .ok);
     try testing.expectEqualStrings(
         \\"str"
@@ -208,9 +210,6 @@ test "negated char class matches not char class" {
         else
             _pat;
 
-        const RuleType = enum { c };
-        const Rule = struct { RuleType, pk.peg.Pattern };
-        const rules = [_]Rule{.{ .c, pat }};
         const expecteds = .{
             .{ "a", .err },
             .{ "z", .err },
@@ -221,15 +220,20 @@ test "negated char class matches not char class" {
             .{ "\x00", .ok },
             .{ "\xff", .ok },
         };
+        const G = struct {
+            pub const NonTerminal = enum { c };
+            pub const Rule = struct { NonTerminal, pk.peg.Pattern };
+            pub const rules = [_]Rule{.{ .c, pat }};
+        };
         inline for (expecteds) |expected| {
-            const Ctx = pk.peg.Pattern.RunCtx([]const Rule);
-            var ctx = Ctx.init(pk.input(expected[0]), &rules, 0);
+            const Ctx = pk.peg.Pattern.RunCtx;
+            var ctx = Ctx.init(pk.input(expected[0]), 0, talloc);
             var r: pk.peg.Pattern.Result = undefined;
-            pat.run(Rule, &ctx, &r);
+            pat.run(G, &ctx, &r);
             // std.debug.print("negated={} r={} expected={}\n", .{ negated, r, expected });
             try testing.expect((r.output == expected[1]) == negated);
-            var ctx2 = Ctx.init(pk.input(expected[0]), &rules, 0);
-            not_pat.run(Rule, &ctx2, &r);
+            var ctx2 = Ctx.init(pk.input(expected[0]), 0, talloc);
+            not_pat.run(G, &ctx2, &r);
             try testing.expect((r.output == expected[1]) == negated);
         }
     }

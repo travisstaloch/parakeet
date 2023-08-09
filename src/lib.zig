@@ -51,7 +51,7 @@ pub const Input = struct {
     }
 
     pub fn sliceAssume(i: Input, len: u32) []const u8 {
-        return i.s[i.index..][0..len];
+        return i.s[i.index .. i.index + len];
     }
 
     pub fn advanceBy(i: Input, count: u32) Input {
@@ -79,8 +79,7 @@ pub const Input = struct {
     }
 
     pub fn startsWith(i: Input, s: []const u8) bool {
-        // TODO make s comptime and optimize
-        return util.startsWith(u8, i.s[i.index..i.len], s);
+        return util.startsWith(i.s[i.index..i.len], s);
     }
 
     pub fn format(i: Input, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {

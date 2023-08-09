@@ -38,11 +38,10 @@ pub fn main() !void {
         const G = pg.Grammar(pk, opts);
         const start = nextArg(&args) orelse
             usage("missing argument: <start>", .{});
-        const start_id = std.meta.stringToEnum(G.RuleType, start) orelse
+        const start_id = std.meta.stringToEnum(G.NonTerminal, start) orelse
             usage("invalid start rule name '{s}'", .{start});
         const r = peg.Pattern.parse(
-            G.Rule,
-            &G.rules,
+            G,
             @intFromEnum(start_id),
             input,
             .{ .allocator = alloc },

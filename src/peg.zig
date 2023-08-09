@@ -300,46 +300,50 @@ pub const Expr = union(enum) {
     ) !void {
         if (depth > 0) _ = try writer.writeByte('&');
         switch (e) {
-            .grammar => |ds| {
+            .grammar => |rules| {
                 _ = try writer.write(
                     \\pub fn Grammar(
                     \\    comptime pk: type,
                     \\    comptime options: struct { eval_branch_quota: usize = 1000 },
                     \\) type {
                     \\    return struct {
-                    \\    pub const Rule = struct{RuleType, pk.peg.Pattern};
-                    \\    pub const RuleType = enum {
+                    \\    pub const Rule = struct{NonTerminal, pk.peg.Pattern};
+                    \\    pub const NonTerminal = enum {
                     \\
                 );
-                for (ds) |d| {
-                    _ = try writer.write(d[0]);
+                for (rules) |rule| {
+                    try writer.writeByteNTimes(' ', 8);
+                    _ = try writer.write(rule[0]);
                     _ = try writer.write(",\n");
                 }
                 _ = try writer.write(
+                    \\    };
                     \\
-                    \\};
                     \\    const pat = pk.peg.Pattern;
-                    \\    const n = @typeInfo(RuleType).Enum.fields.len;
+                    \\    const n = @typeInfo(NonTerminal).Enum.fields.len;
                     \\    fn _rules() [n]Rule {
-                    \\    @setEvalBranchQuota(options.eval_branch_quota);
-                    \\    return [_]Rule{
+                    \\        @setEvalBranchQuota(options.eval_branch_quota);
+                    \\        return [_]Rule{
                     \\
                 );
-                for (ds) |d| {
-                    try writer.print(".{{ .{s}, ", .{d[0]});
-                    try d[1].formatGenImpl(writer, depth);
+                for (rules) |rule| {
+                    try writer.writeByteNTimes(' ', 8);
+                    try writer.print(".{{ .{s}, ", .{rule[0]});
+                    try rule[1].formatGenImpl(writer, depth);
                     _ = try writer.write("},\n");
                 }
                 _ = try writer.write(
-                    \\};
-                    \\}
-                    \\    pub const rules = _rules();
-                    \\};
+                    \\        };
+                    \\    }
+                    \\
+                    \\    const rules_array = _rules();
+                    \\    pub const rules: [*]const Rule = &rules_array;
+                    \\    };
                     \\}
                 );
             },
             .ident => |s| {
-                try writer.print("pat.nontermId(@intFromEnum(RuleType.{s}))", .{s});
+                try writer.print("pat.nontermId(@intFromEnum(NonTerminal.{s}))", .{s});
             },
             .litS, .litD => |s| {
                 _ = try writer.write("pat.literal(\"");
@@ -420,7 +424,7 @@ pub const Expr = union(enum) {
 /// a data format similar to Expr for encoding parsers and running them
 /// on input with Pattern.parse() and run().
 pub const Pattern = union(enum) {
-    literal: []const u8,
+    literal: Literal,
     class: *const Expr.Class,
     alt: []const Pattern,
     seq: []const Pattern,
@@ -430,7 +434,7 @@ pub const Pattern = union(enum) {
     not: *const Pattern,
     amp: *const Pattern,
     group: *const Pattern,
-    nonterm_id: usize,
+    nonterm_id: u32,
     dot,
     eos,
     empty,
@@ -439,11 +443,14 @@ pub const Pattern = union(enum) {
     comptime {
         std.debug.assert(24 == @sizeOf(Pattern));
     }
-
+    pub const Literal = struct { ptr: [*]const u8, len: u32 };
     pub const Tag = std.meta.Tag(Pattern);
 
-    pub fn literal(payload: []const u8) Pattern {
-        return .{ .literal = payload };
+    pub fn literal(comptime payload: []const u8) Pattern {
+        return .{ .literal = .{
+            .ptr = payload.ptr,
+            .len = @intCast(payload.len),
+        } };
     }
     pub fn class(payload: *const Expr.Class) Pattern {
         return .{ .class = payload };
@@ -491,7 +498,13 @@ pub const Pattern = union(enum) {
         return .{ .anychar = payload };
     }
 
-    pub const ParseError = error{ParseFailure};
+    pub const ParseError = error{
+        ParseFailure,
+        AllocatorRequired,
+        UnexpectedResult,
+    } ||
+        mem.Allocator.Error;
+
     pub const Result = struct {
         input: pk.Input,
         output: Output,
@@ -507,6 +520,9 @@ pub const Pattern = union(enum) {
         pub fn err(i: pk.Input) Result {
             return .{ .input = i, .output = .{ .err = error.ParseFailure } };
         }
+        pub fn errWith(i: pk.Input, e: ParseError) Result {
+            return .{ .input = i, .output = .{ .err = e } };
+        }
         pub fn ok(i: pk.Input, s: [2]u32) Result {
             return .{ .input = i, .output = .{ .ok = s } };
         }
@@ -514,54 +530,55 @@ pub const Pattern = union(enum) {
 
     const debug = std.log.debug;
 
-    pub fn RunCtx(comptime Rules: type) type {
-        return struct {
-            in: pk.Input,
-            rules: Rules,
-            id: usize,
+    pub const RunCtx = struct {
+        in: pk.Input,
+        id: u32,
+        allocator: mem.Allocator,
 
-            pub fn init(in: pk.Input, rules: Rules, id: usize) @This() {
-                return .{ .in = in, .rules = rules, .id = id };
-            }
-        };
-    }
+        pub fn init(
+            in: pk.Input,
+            id: u32,
+            allocator: mem.Allocator,
+        ) @This() {
+            return .{ .in = in, .id = id, .allocator = allocator };
+        }
+    };
 
     pub fn parse(
-        comptime Rule: type,
-        rules: []const Rule,
-        start_rule_id: usize,
+        comptime Grammar: type,
+        start_rule_id: u32,
         input: []const u8,
         opts: pk.Options,
     ) Result {
-        _ = opts;
         var in = pk.input(input);
-        const rule = rules[start_rule_id];
-        var ctx = RunCtx([]const Rule).init(in, rules, start_rule_id);
+        const allocator = opts.allocator orelse pk.failing_allocator;
+        var ctx = RunCtx.init(in, start_rule_id, allocator);
         var result: Result = undefined;
-        rule[1].run(Rule, &ctx, &result);
+        Grammar.rules[start_rule_id][1].run(Grammar, &ctx, &result);
         return result;
     }
 
+    // run() is recursive so it is optimized to reduce fn call overhead, passing
+    // 'ctx' and 'res' by pointer. because of this, they are often reused below
+    // and some control flow may be sligntly non-intuitive.
     pub fn run(
         pat: Pattern,
-        comptime Rule: type,
-        ctx: *RunCtx([]const Rule),
+        comptime Grammar: type,
+        ctx: *RunCtx,
         res: *Result,
     ) void {
         const in = ctx.in;
         switch (pat) {
             .nonterm_id => |id| {
-                const p = ctx.rules[id][1];
-                const oldid = ctx.id;
-                defer ctx.id = oldid;
+                const prev_id = ctx.id;
+                defer ctx.id = prev_id;
                 ctx.id = id;
-                p.run(Rule, ctx, res);
-                // if (r.output == .ok)
-                //     debug("{} {} {s} ok", .{ r.input, p, name });
+                const p = Grammar.rules[id][1];
+                p.run(Grammar, ctx, res);
             },
-            .literal => |s| {
-                res.* = if (in.startsWith(s))
-                    Result.ok(in.advanceBy(@intCast(s.len)), in.range(@intCast(s.len)))
+            .literal => |lit| {
+                res.* = if (in.startsWith(lit.ptr[0..lit.len]))
+                    Result.ok(in.advanceBy(lit.len), in.range(lit.len))
                 else
                     Result.err(in);
             },
@@ -591,7 +608,7 @@ pub const Pattern = union(enum) {
             .anychar => @panic("TODO tag=anychar"),
             .seq => |pats| {
                 for (pats) |p| {
-                    p.run(Rule, ctx, res);
+                    p.run(Grammar, ctx, res);
                     if (res.output == .err) return;
                     ctx.in.index = res.input.index;
                 }
@@ -600,33 +617,33 @@ pub const Pattern = union(enum) {
             .alt => |pats| {
                 for (pats) |*p| {
                     ctx.in.index = in.index;
-                    p.run(Rule, ctx, res);
+                    p.run(Grammar, ctx, res);
                     if (res.output == .ok) return;
                 }
                 res.* = Result.err(in);
             },
             .many => |p| {
                 while (true) {
-                    p.run(Rule, ctx, res);
+                    p.run(Grammar, ctx, res);
                     ctx.in.index = res.input.index;
                     if (res.output == .err) break;
                 }
                 res.* = Result.ok(ctx.in, in.rangeTo(ctx.in.index));
             },
             .plus => |p| {
-                p.run(Rule, ctx, res);
+                p.run(Grammar, ctx, res);
                 ctx.in.index = res.input.index;
                 if (res.output == .err) return;
                 while (true) {
-                    p.run(Rule, ctx, res);
+                    p.run(Grammar, ctx, res);
                     ctx.in.index = res.input.index;
                     if (res.output == .err) break;
                 }
                 res.* = Result.ok(ctx.in, in.rangeTo(ctx.in.index));
             },
-            .group => |p| p.run(Rule, ctx, res),
+            .group => |p| p.run(Grammar, ctx, res),
             .not => |p| {
-                p.run(Rule, ctx, res);
+                p.run(Grammar, ctx, res);
                 ctx.in.index = in.index;
                 res.* = if (res.output == .ok)
                     Result.err(in)
@@ -634,7 +651,7 @@ pub const Pattern = union(enum) {
                     Result.ok(in, in.rangeTo(res.input.index));
             },
             .amp => |p| {
-                p.run(Rule, ctx, res);
+                p.run(Grammar, ctx, res);
                 ctx.in.index = in.index;
                 res.* = .{ .input = in, .output = res.output };
             },
@@ -643,7 +660,7 @@ pub const Pattern = union(enum) {
             else
                 Result.err(in),
             .opt => |p| {
-                p.run(Rule, ctx, res);
+                p.run(Grammar, ctx, res);
                 if (res.output == .ok) return;
                 ctx.in.index = in.index;
                 res.* = Result.ok(in, in.range(0));
@@ -659,7 +676,8 @@ pub const Pattern = union(enum) {
     ) !void {
         try writer.print("{s}: ", .{@tagName(pat)});
         switch (pat) {
-            .nonterm, .literal => |s| _ = try writer.write(s),
+            .literal => |s| _ = try writer.write(s),
+            .nonterm_id => |id| _ = try writer.print("nonterm_id={}", .{id}),
             .seq, .alt => |pats| _ = try writer.print("{}", .{pats.len}),
             .many,
             .plus,
