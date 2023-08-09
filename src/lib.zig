@@ -472,6 +472,13 @@ pub fn toStruct(comptime T: type) ToStruct(T) {
     }.func;
 }
 
+pub fn isEmptyString(s: []const u8) bool {
+    return s.len == 0;
+}
+pub fn isNonEmptyString(s: []const u8) bool {
+    return s.len > 0;
+}
+
 // -------------------
 // - end map helpers -
 // -------------------

@@ -67,13 +67,15 @@ fn litWithTag(comptime tag: Expr.Tag) fn ([]const u8) Expr {
     }.func;
 }
 
-pub const ExprP = pk.ParserWithErrorSet(
-    pk.Input,
-    Expr,
-    std.fmt.ParseIntError || pk.ParseError,
-);
+pub fn ExprP(comptime E: type) type {
+    return pk.ParserWithErrorSet(
+        pk.Input,
+        Expr,
+        std.fmt.ParseIntError || pk.ParseError || E,
+    );
+}
 
-fn litStr(comptime c: u8, tag: Expr.Tag) ExprP {
+fn litStr(comptime c: u8, tag: Expr.Tag) ExprP(error{}) {
     const cp = ps.char(c);
     return cp
         .discardL(ps.manyUntil(chr_c, cp))
@@ -98,8 +100,8 @@ pub const range = ps.choice(.{
     ps.peek(ps.notchar(']')).discardL(chr_c.map(Charset.one)),
 });
 
-fn foldRange(set: *Expr.Class.Set, ok: Charset) void {
-    switch (ok) {
+fn accCharsets(set: *Expr.Class.Set, cset: Charset) void {
+    switch (cset) {
         .one => |c| set.set(c),
         .range => |ab| set.setRangeValue(
             .{ .start = ab[0], .end = ab[1] + 1 },
@@ -108,11 +110,31 @@ fn foldRange(set: *Expr.Class.Set, ok: Charset) void {
     }
 }
 
+// returns error if more than 1/2 of non-negated class bits are set.
+fn maybeNegate(neg: bool, bitset: Expr.Class.Set) !Expr.Class.Set {
+    const count = bitset.count();
+    if (neg and count * 2 > Expr.Class.Set.bit_length) {
+        std.debug.print(
+            "error: negated character class must have less than " ++
+                " half of its bits set.  expected {} bits set.  found {}. " ++
+                "class={}",
+            .{ Expr.Class.Set.bit_length, count, Expr{ .class = .{ .bitset = bitset } } },
+        );
+        return error.InvalidCharacterClass;
+    }
+    return if (neg) bitset.complement() else bitset;
+}
+
+// zig fmt: off
 pub const class = ps.char('[')
-    .discardL(ps.foldWhile(Expr.Class.Set.initEmpty(), range, foldRange))
-    .map(Expr.class)
+    .discardL(ps.seqMap(.{
+        ps.option(ps.char('^')).map(pk.isNonEmptyString),
+        ps.foldWhile(Expr.Class.Set.initEmpty(), range, accCharsets),
+    }, maybeNegate)
+    .map(Expr.class))
     .discardR(ps.char(']'))
     .discardR(spacing);
+// zig fmt: on
 
 pub const primary = ps.choice(.{ ident, group, literal, class, dot });
 
@@ -181,7 +203,7 @@ pub const expression = ps.seqMap(.{
 }, Expr.initPlusRes)
     .mapAlloc(Expr.initFnAlloc(.alt));
 
-fn exprRef() ExprP {
+fn exprRef() ExprP(error{InvalidCharacterClass}) {
     return expression;
 }
 

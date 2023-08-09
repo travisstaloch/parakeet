@@ -55,8 +55,11 @@ pub const Expr = union(enum) {
     pub const Def = struct { []const u8, Expr };
     pub const Tag = std.meta.Tag(Expr);
     pub const Class = struct {
+        /// if more than 1/2 of the 256 bits are set the Class is
+        /// implicitly 'negated'. this removes the need for a 'negated' bool field
+        /// and shrinks the size of this struct from 40 to 32.
         bitset: Set,
-        negated: bool = false,
+
         pub const Set = std.StaticBitSet(256);
 
         pub fn format(
@@ -71,10 +74,7 @@ pub const Expr = union(enum) {
         }
 
         comptime {
-            // TODO remove 'negated' bool, save 8 bytes by making 'negated'
-            // implicit if more than 1/2 of the 256 bits are set.
-            // TODO compile error if more than 1/2 of non-negated class bits are set.
-            std.debug.assert(@sizeOf(Class) == 40);
+            std.debug.assert(@sizeOf(Class) == 32);
         }
 
         pub fn init(cs: []const Charset) Class {
@@ -86,7 +86,7 @@ pub const Expr = union(enum) {
                     .range => |ab| for (ab[0]..ab[1] + 1) |c| bitset.set(c),
                 }
             }
-            return .{ .bitset = bitset, .negated = negated };
+            return .{ .bitset = if (negated) bitset.complement() else bitset };
         }
     };
 
@@ -229,8 +229,12 @@ pub const Expr = union(enum) {
         switch (e) {
             .litS, .litD => |s| for (s) |c| try unescapeByte(c, writer, e),
             .class => |klass| {
-                if (klass.negated) try writer.writeByte('^');
-                var iter = klass.bitset.iterator(.{});
+                const negated = klass.bitset.count() * 2 > Expr.Class.Set.bit_length;
+                if (negated) try writer.writeByte('^');
+                var iter = if (negated)
+                    klass.bitset.complement().iterator(.{})
+                else
+                    klass.bitset.iterator(.{});
                 var state: ClassIterState = .first_iter;
                 var prev: u8 = undefined;
                 while (iter.next()) |_c| {
@@ -437,8 +441,12 @@ pub const Expr = union(enum) {
             .class => |klass| {
                 _ = try writer.write("pat.class(&Class.init(&.{");
                 // TODO optimize. if if all .one, use Pattern.anychar
-                if (klass.negated) _ = try writer.write(".{.one = '^'},");
-                var iter = klass.bitset.iterator(.{});
+                const negated = klass.bitset.count() * 2 > Expr.Class.Set.bit_length;
+                if (negated) _ = try writer.write(".{.one = '^'},");
+                var iter = if (negated)
+                    klass.bitset.complement().iterator(.{})
+                else
+                    klass.bitset.iterator(.{});
                 var state: ClassIterState = .first_iter;
                 var prev: u8 = undefined;
                 while (iter.next()) |_c| {
@@ -729,11 +737,10 @@ pub const Pattern = union(enum) {
                     res.* = Result.err(in);
                     return;
                 };
-                const err = klass.bitset.isSet(ic) == klass.negated;
-                res.* = if (err)
-                    Result.err(in)
+                res.* = if (klass.bitset.isSet(ic))
+                    Result.ok(in.advanceBy(1), in.range(1))
                 else
-                    Result.ok(in.advanceBy(1), in.range(1));
+                    Result.err(in);
             },
             .dot => res.* = if (in.hasCount(1))
                 Result.ok(in.advanceBy(1), in.range(1))

@@ -9,9 +9,6 @@ pub fn build(b: *std.Build) void {
     const grammar = b.option([]const u8, "grammar", "which grammar to use. " ++
         " must be either 'peg' or 'zig'") orelse "";
     options.addOption([]const u8, "grammar", grammar);
-    const eql_naive = b.option(bool, "eql_naive", "use util.eqlNaive rather" ++
-        " than eqlFast for string eql comparisons.  used for benchmarking.") orelse false;
-    options.addOption(bool, "eql_naive", eql_naive);
 
     const parakeet_mod = b.addModule("parakeet", .{
         .source_file = .{ .path = "src/lib.zig" },
@@ -26,7 +23,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
-        // unit_tests.filter = "peg grammar";
+        // unit_tests.filter = "";
         unit_tests.addModule("parakeet", parakeet_mod);
         const run_unit_tests = b.addRunArtifact(unit_tests);
         run_unit_tests.has_side_effects = true;

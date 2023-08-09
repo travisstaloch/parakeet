@@ -586,7 +586,7 @@ pub fn seqMap(comptime ps: anytype, comptime f: anytype) SeqMap(ps, f) {
             else
                 f(tup);
         }
-    }.func).withType(.seqMapAlloc);
+    }.func).withType(.seqMap);
 }
 
 pub fn seqMapAlloc(comptime ps: anytype, comptime f: anytype) SeqMap(ps, f) {

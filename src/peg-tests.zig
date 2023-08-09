@@ -123,6 +123,9 @@ test "peg character class" {
         \\["'\\nrt]
     );
     try checkSame(Peg.expression, "[0-9A-Z_a-z]");
+    try checkSame(Peg.expression,
+        \\[^\n"\\]
+    );
 }
 
 test "peg misc" {
@@ -208,8 +211,10 @@ test "negated char class matches not char class" {
     }));
     inline for (.{ true, false }) |negated| {
         const pat = comptime pk.peg.Pattern.class(&.{
-            .negated = negated,
-            .bitset = _pat.class.bitset,
+            .bitset = if (negated)
+                _pat.class.bitset.complement()
+            else
+                _pat.class.bitset,
         });
         const not_pat = if (negated)
             comptime pk.peg.Pattern.not(&_pat)
