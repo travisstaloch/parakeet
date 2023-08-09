@@ -5,8 +5,6 @@ pub fn startsWith(haystk: []const u8, needle: []const u8) bool {
     return (needle.len <= haystk.len and eql(haystk[0..needle.len], needle));
 }
 
-pub const eql = if (@import("build_options").eql_naive) eqlNaive else eqlFast;
-
 pub fn eqlNaive(a: []const u8, b: []const u8) bool {
     std.debug.assert(a.len == b.len);
     for (a, b) |a_elem, b_elem| {
@@ -15,7 +13,7 @@ pub fn eqlNaive(a: []const u8, b: []const u8) bool {
     return true;
 }
 
-pub fn eqlFast(a: []const u8, b: []const u8) bool {
+pub fn eql(a: []const u8, b: []const u8) bool {
     std.debug.assert(a.len == b.len);
     const U = usize;
     const size = @sizeOf(U);

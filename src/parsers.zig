@@ -1249,3 +1249,35 @@ pub fn scanString(
         }
     }.func);
 }
+
+pub fn FoldWhile(comptime p: anytype, comptime T: type) type {
+    return Parser(TypeOf(p).Input, T);
+}
+
+pub fn foldWhile(
+    comptime init_state: anytype,
+    comptime p: anytype,
+    comptime f: fn (*@TypeOf(init_state), TypeOf(p).Ok) void,
+) FoldWhile(p, @TypeOf(init_state)) {
+    const P = FoldWhile(p, @TypeOf(init_state));
+    return .{
+        .runFn = struct {
+            fn run(_: P, i: P.Input, opts: Options) P.Result {
+                var state = init_state;
+                var imut = i;
+                while (true) {
+                    const r = p.run(imut, opts);
+                    if (r.output == .err) break;
+                    imut.index = r.input.index;
+                    f(&state, r.output.ok);
+                }
+                return if (imut.index == i.index)
+                    P.err(i, .{})
+                else
+                    P.ok(imut, state, .{});
+            }
+        }.run,
+        .fail_handler = default_fail_handler,
+        .type = .foldWhile,
+    };
+}

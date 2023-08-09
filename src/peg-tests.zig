@@ -6,6 +6,8 @@ const parseString = peg.parseString;
 const Peg = @import("peg-parsers.zig");
 
 const talloc = testing.allocator;
+// var gpa = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 40 }){};
+// const talloc = gpa.allocator();
 
 fn checkStr(p: anytype, in: []const u8, expected: []const u8) !void {
     const e = try parseString(p, in, talloc);
@@ -13,6 +15,7 @@ fn checkStr(p: anytype, in: []const u8, expected: []const u8) !void {
 }
 
 fn check(p: anytype, in: []const u8, expected: []const u8) !void {
+    // std.debug.print("check in={s} expected={s}\n", .{ in, expected });
     const e = try parseString(p, in, talloc);
     defer e.deinit(talloc);
     var buf: [0x100]u8 = undefined;
@@ -49,7 +52,7 @@ test "peg expression" {
     try checkSame(Peg.expression,
         \\"\\x" hex hex
         \\    / "\\u{" hex+ "}"
-        \\    / "\\" [nr\\t'"]
+        \\    / "\\" ["'\\nrt]
     );
     // groups with a single child don't need to be grouped
     try check(Peg.expression, "( !Prefix )*", "!Prefix*");
@@ -97,7 +100,7 @@ test "peg string literal" {
 test "peg character class" {
     try checkSame(Peg.expression, "[a]");
     try checkSame(Peg.expression, "[a-z]");
-    try checkSame(Peg.expression, "[a-zA-Z]");
+    try checkSame(Peg.expression, "[A-Za-z]");
     try checkSame(Peg.expression, "[\\-]");
     try checkSame(Peg.expression, "[\\t]");
     try checkSame(Peg.expression,
@@ -116,6 +119,10 @@ test "peg character class" {
         error.ParseFailure,
         checkSame(Peg.expression, "[]"),
     );
+    try checkSame(Peg.expression,
+        \\["'\\nrt]
+    );
+    try checkSame(Peg.expression, "[0-9A-Z_a-z]");
 }
 
 test "peg misc" {
@@ -157,7 +164,7 @@ test "peg grammar" {
         \\char_escape <-
         \\      "\\x" hex hex
         \\    / "\\u{" hex+ "}"
-        \\    / "\\" [nr\\t'"]
+        \\    / "\\" ["'\\nrt]
         \\char_char <-
         \\      mb_utf8_literal
         \\    / char_escape
@@ -168,16 +175,17 @@ test "peg grammar" {
 // TODO move to pattern-test.zig
 test "pattern with negated character classes" {
     const pat = pk.peg.Pattern;
+    const Class = pk.peg.Expr.Class;
     // zig fmt: off
     const G = struct{
         pub const NonTerminal = enum { line_comment, skip, hex, char_escape, string_char, STRINGLITERALSINGLE };
         pub const Rule = struct { NonTerminal, pk.peg.Pattern };
         pub const rules = [_]Rule{
-            .{ .line_comment, pat.alt(&.{pat.seq(&.{pat.literal("//"), pat.not(&pat.class(&.{.sets = &.{.{.one='!'}, .{.one='/'}, }})), pat.many(&pat.class(&.{.sets = &.{.{.one='\n'}, },.negated = true})), }), pat.seq(&.{pat.literal("////"), pat.many(&pat.class(&.{.sets = &.{.{.one='\n'}, },.negated = true})), }), })},
-            .{ .skip, pat.many(&pat.group(&pat.alt(&.{pat.class(&.{.sets = &.{.{.one=' '}, .{.one='\n'}, }}), pat.nontermId(@intFromEnum(NonTerminal.line_comment)), })))},
-            .{ .hex, pat.class(&.{.sets = &.{.{.range=.{'0', '9'}}, .{.range=.{'a', 'f'}}, .{.range=.{'A', 'F'}}, }})},
-            .{ .char_escape, pat.alt(&.{pat.seq(&.{pat.literal("\\x"), pat.nontermId(@intFromEnum(NonTerminal.hex)), pat.nontermId(@intFromEnum(NonTerminal.hex)), }), pat.seq(&.{pat.literal("\\u{"), pat.plus(&pat.nontermId(@intFromEnum(NonTerminal.hex))), pat.literal("}"), }), pat.seq(&.{pat.literal("\\"), pat.class(&.{.sets = &.{.{.one='n'}, .{.one='r'}, .{.one='\\'}, .{.one='t'}, .{.one='\''}, .{.one='"'}, }}), }), })},
-            .{ .string_char, pat.alt(&.{pat.nontermId(@intFromEnum(NonTerminal.char_escape)), pat.class(&.{.sets = &.{.{.one='\\'}, .{.one='"'}, .{.one='\n'}, },.negated = true}), })},
+            .{ .line_comment, pat.alt(&.{pat.seq(&.{pat.literal("//"), pat.not(&pat.class(&Class.init(&.{.{.one='!'}, .{.one='/'}, }))), pat.many(&pat.class(&Class.init(&.{.{.one = '^'},.{.one='\n'}, }))), }), pat.seq(&.{pat.literal("////"), pat.many(&pat.class(&Class.init(&.{.{.one = '^'},.{.one='\n'}, }))), }), })},
+            .{ .skip, pat.many(&pat.group(&pat.alt(&.{pat.class(&Class.init(&.{.{.one='\n'}, .{.one=' '}, })), pat.nontermId(@intFromEnum(NonTerminal.line_comment)), })))},
+            .{ .hex, pat.class(&Class.init(&.{.{.range=.{'0', '9'}}, }))},
+            .{ .char_escape, pat.alt(&.{pat.seq(&.{pat.literal("\\x"), pat.nontermId(@intFromEnum(NonTerminal.hex)), pat.nontermId(@intFromEnum(NonTerminal.hex)), }), pat.seq(&.{pat.literal("\\u{"), pat.plus(&pat.nontermId(@intFromEnum(NonTerminal.hex))), pat.literal("}"), }), pat.seq(&.{pat.literal("\\"), pat.class(&Class.init(&.{.{.one='"'}, .{.one='\''}, })), }), })},
+            .{ .string_char, pat.alt(&.{pat.nontermId(@intFromEnum(NonTerminal.char_escape)), pat.class(&Class.init(&.{.{.one = '^'},.{.one='\n'}, .{.one='"'}, })), })},
             .{ .STRINGLITERALSINGLE, pat.seq(&.{pat.literal("\""), pat.many(&pat.nontermId(@intFromEnum(NonTerminal.string_char))), pat.literal("\""), pat.nontermId(@intFromEnum(NonTerminal.skip)), })},
         };
     };
@@ -192,18 +200,16 @@ test "pattern with negated character classes" {
 }
 
 test "negated char class matches not char class" {
-    const _pat = comptime pk.peg.Pattern.class(&.{
-        .sets = &.{
-            .{ .range = .{ 'a', 'z' } },
-            .{ .range = .{ 'A', 'Z' } },
-            .{ .range = .{ '0', '9' } },
-            .{ .one = '_' },
-        },
-    });
+    const _pat = comptime pk.peg.Pattern.class(&pk.peg.Expr.Class.init(&.{
+        .{ .range = .{ 'a', 'z' } },
+        .{ .range = .{ 'A', 'Z' } },
+        .{ .range = .{ '0', '9' } },
+        .{ .one = '_' },
+    }));
     inline for (.{ true, false }) |negated| {
         const pat = comptime pk.peg.Pattern.class(&.{
             .negated = negated,
-            .sets = _pat.class.sets,
+            .bitset = _pat.class.bitset,
         });
         const not_pat = if (negated)
             comptime pk.peg.Pattern.not(&_pat)
@@ -230,7 +236,7 @@ test "negated char class matches not char class" {
             var ctx = Ctx.init(pk.input(expected[0]), 0, talloc);
             var r: pk.peg.Pattern.Result = undefined;
             pat.run(G, &ctx, &r);
-            // std.debug.print("negated={} r={} expected={}\n", .{ negated, r, expected });
+            // std.debug.print("negated={} r={} expected=({s},{})\n", .{ negated, r, expected[0], expected[1] });
             try testing.expect((r.output == expected[1]) == negated);
             var ctx2 = Ctx.init(pk.input(expected[0]), 0, talloc);
             not_pat.run(G, &ctx2, &r);

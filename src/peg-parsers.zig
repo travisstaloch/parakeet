@@ -93,10 +93,23 @@ pub const range1 = ps.seqMap(
     .{ chr_c, ps.char('-').discard(), chr_c },
     Charset.range,
 );
-pub const range = ps.choice(.{ range1, chr_c.map(Charset.one) });
+pub const range = ps.choice(.{
+    range1,
+    ps.peek(ps.notchar(']')).discardL(chr_c.map(Charset.one)),
+});
+
+fn foldRange(set: *Expr.Class.Set, ok: Charset) void {
+    switch (ok) {
+        .one => |c| set.set(c),
+        .range => |ab| set.setRangeValue(
+            .{ .start = ab[0], .end = ab[1] + 1 },
+            true,
+        ),
+    }
+}
 
 pub const class = ps.char('[')
-    .discardL(ps.manyUntil(range, ps.char(']')))
+    .discardL(ps.foldWhile(Expr.Class.Set.initEmpty(), range, foldRange))
     .map(Expr.class)
     .discardR(ps.char(']'))
     .discardR(spacing);

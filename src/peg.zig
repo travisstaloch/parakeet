@@ -13,6 +13,22 @@ pub const Charset = union(enum) {
     pub fn range(a: u8, b: u8) Charset {
         return .{ .range = .{ a, b } };
     }
+
+    pub fn format(
+        cset: Charset,
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        switch (cset) {
+            .one => |c| try Expr.unescapeByte(c, writer, .class),
+            .range => |ab| {
+                try Expr.unescapeByte(ab[0], writer, .class);
+                try writer.writeByte('-');
+                try Expr.unescapeByte(ab[1], writer, .class);
+            },
+        }
+    }
 };
 
 pub const Expr = union(enum) {
@@ -39,8 +55,10 @@ pub const Expr = union(enum) {
     pub const Def = struct { []const u8, Expr };
     pub const Tag = std.meta.Tag(Expr);
     pub const Class = struct {
-        sets: []const Charset,
+        bitset: Set,
         negated: bool = false,
+        pub const Set = std.StaticBitSet(256);
+
         pub fn format(
             c: Class,
             comptime _: []const u8,
@@ -50,6 +68,25 @@ pub const Expr = union(enum) {
             try writer.writeByte('[');
             try Expr.unescape(.{ .class = c }, writer);
             try writer.writeByte(']');
+        }
+
+        comptime {
+            // TODO remove 'negated' bool, save 8 bytes by making 'negated'
+            // implicit if more than 1/2 of the 256 bits are set.
+            // TODO compile error if more than 1/2 of non-negated class bits are set.
+            std.debug.assert(@sizeOf(Class) == 40);
+        }
+
+        pub fn init(cs: []const Charset) Class {
+            const negated = cs.len > 0 and cs[0] == .one and cs[0].one == '^';
+            var bitset = Class.Set.initEmpty();
+            for (cs[@intFromBool(negated)..]) |cset| {
+                switch (cset) {
+                    .one => |c| bitset.set(c),
+                    .range => |ab| for (ab[0]..ab[1] + 1) |c| bitset.set(c),
+                }
+            }
+            return .{ .bitset = bitset, .negated = negated };
         }
     };
 
@@ -68,8 +105,7 @@ pub const Expr = union(enum) {
                 allocator.free(ds);
             },
             .litD, .litS => |s| allocator.free(s),
-            .class => |klass| allocator.free(klass.sets),
-            .ident, .dot, .empty => {},
+            .ident, .dot, .empty, .class => {},
         }
     }
 
@@ -115,12 +151,8 @@ pub const Expr = union(enum) {
         }.func;
     }
 
-    pub fn class(cs: []const Charset) !Expr {
-        const negated = cs.len > 0 and cs[0] == .one and cs[0].one == '^';
-        return .{ .class = .{
-            .sets = cs[@intFromBool(negated)..],
-            .negated = negated,
-        } };
+    pub fn class(bitset: Expr.Class.Set) Expr {
+        return .{ .class = .{ .bitset = bitset } };
     }
 
     pub fn group(e: Expr, mallocator: ?mem.Allocator) !Expr {
@@ -181,20 +213,71 @@ pub const Expr = union(enum) {
         }
     }
 
+    const ClassIterState = union(enum) {
+        first_iter,
+        in_range: u8,
+        other,
+    };
+
+    fn bitsetIterCountLeft(iter: Expr.Class.Set.Iterator(.{})) usize {
+        var res = @popCount(iter.bits_remain);
+        for (iter.words_remain) |word| res += @popCount(word);
+        return res;
+    }
+
     pub fn unescape(e: Expr, writer: anytype) !void {
         switch (e) {
             .litS, .litD => |s| for (s) |c| try unescapeByte(c, writer, e),
             .class => |klass| {
                 if (klass.negated) try writer.writeByte('^');
-                for (klass.sets) |set| {
-                    switch (set) {
-                        .one => |c| try unescapeByte(c, writer, e),
-                        .range => |ab| {
-                            try unescapeByte(ab[0], writer, e);
-                            try writer.writeByte('-');
-                            try unescapeByte(ab[1], writer, e);
+                var iter = klass.bitset.iterator(.{});
+                var state: ClassIterState = .first_iter;
+                var prev: u8 = undefined;
+                while (iter.next()) |_c| {
+                    const c: u8 = @truncate(_c);
+                    // std.debug.print("state={s} c='{}' prev='{}' left={}\n", .{ @tagName(state), std.zig.fmtEscapes(&.{c}), std.zig.fmtEscapes(if (prev) |p| &.{p} else &.{}), @popCount(iter.bits_remain) });
+                    if (bitsetIterCountLeft(iter) == 0)
+                        // last iteration
+                        switch (state) {
+                            .first_iter => try unescapeByte(c, writer, e),
+                            .in_range => {
+                                if (prev + 1 != c) {
+                                    try unescapeByte(state.in_range, writer, e);
+                                    try writer.writeByte('-');
+                                    try unescapeByte(prev, writer, e);
+                                    try unescapeByte(c, writer, e);
+                                } else {
+                                    try unescapeByte(state.in_range, writer, e);
+                                    try writer.writeByte('-');
+                                    try unescapeByte(c, writer, e);
+                                }
+                            },
+                            .other => {
+                                try unescapeByte(prev, writer, e);
+                                try unescapeByte(c, writer, e);
+                            },
+                        }
+                    else switch (state) {
+                        .first_iter => state = .other,
+                        .in_range => {
+                            if (prev + 1 != c) {
+                                // end of range
+                                try unescapeByte(state.in_range, writer, e);
+                                try writer.writeByte('-');
+                                try unescapeByte(prev, writer, e);
+                                state = .other;
+                            } else {
+                                // stay in range
+                            }
+                        },
+                        .other => {
+                            if (prev + 1 == c)
+                                state = ClassIterState{ .in_range = prev }
+                            else
+                                try unescapeByte(prev, writer, e);
                         },
                     }
+                    prev = c;
                 }
             },
             else => unreachable,
@@ -320,6 +403,7 @@ pub const Expr = union(enum) {
                     \\    };
                     \\
                     \\    const pat = pk.peg.Pattern;
+                    \\    const Class = pk.peg.Expr.Class;
                     \\    const n = @typeInfo(NonTerminal).Enum.fields.len;
                     \\    fn _rules() [n]Rule {
                     \\        @setEvalBranchQuota(options.eval_branch_quota);
@@ -351,23 +435,73 @@ pub const Expr = union(enum) {
                 _ = try writer.write("\")");
             },
             .class => |klass| {
-                _ = try writer.write("pat.class(&.{.sets = &.{");
+                _ = try writer.write("pat.class(&Class.init(&.{");
                 // TODO optimize. if if all .one, use Pattern.anychar
-                for (klass.sets) |c| {
-                    switch (c) {
-                        .range => |ab| try writer.print(".{{.range=.{{'{'}', '{'}'}}}}", .{
-                            std.zig.fmtEscapes(&.{ab[0]}),
-                            std.zig.fmtEscapes(&.{ab[1]}),
-                        }),
-                        .one => |a| try writer.print(".{{.one='{'}'}}", .{
-                            std.zig.fmtEscapes(&.{a}),
-                        }),
+                if (klass.negated) _ = try writer.write(".{.one = '^'},");
+                var iter = klass.bitset.iterator(.{});
+                var state: ClassIterState = .first_iter;
+                var prev: u8 = undefined;
+                while (iter.next()) |_c| {
+                    const c: u8 = @truncate(_c);
+                    // std.debug.print("state={s} c='{}' prev='{}' left={}\n", .{ @tagName(state), std.zig.fmtEscapes(&.{c}), std.zig.fmtEscapes(if (prev) |p| &.{p} else &.{}), bitsetIterCountLeft(iter) });
+                    if (bitsetIterCountLeft(iter) == 0) {
+                        switch (state) {
+                            .first_iter => {
+                                try writer.print(".{{.one='{'}'}}, ", .{
+                                    std.zig.fmtEscapes(&.{c}),
+                                });
+                            },
+                            .in_range => {
+                                if (prev + 1 != c) {
+                                    try writer.print(".{{.range=.{{'{'}', '{'}'}}}}, ", .{
+                                        std.zig.fmtEscapes(&.{state.in_range}),
+                                        std.zig.fmtEscapes(&.{prev}),
+                                    });
+                                    try writer.print(".{{.one='{'}'}}, ", .{
+                                        std.zig.fmtEscapes(&.{c}),
+                                    });
+                                } else {
+                                    try writer.print(".{{.range=.{{'{'}', '{'}'}}}}, ", .{
+                                        std.zig.fmtEscapes(&.{state.in_range}),
+                                        std.zig.fmtEscapes(&.{c}),
+                                    });
+                                }
+                            },
+                            .other => {
+                                try writer.print(".{{.one='{'}'}}, ", .{
+                                    std.zig.fmtEscapes(&.{prev}),
+                                });
+                                try writer.print(".{{.one='{'}'}}, ", .{
+                                    std.zig.fmtEscapes(&.{c}),
+                                });
+                            },
+                        }
+                    } else switch (state) {
+                        .first_iter => state = .other,
+                        .in_range => {
+                            if (prev + 1 != c) {
+                                // exit range
+                                try writer.print(".{{.range=.{{'{'}', '{'}'}}}}, ", .{
+                                    std.zig.fmtEscapes(&.{state.in_range}),
+                                    std.zig.fmtEscapes(&.{prev}),
+                                });
+                                state = .other;
+                            } else {
+                                // stay in range
+                            }
+                        },
+                        .other => {
+                            if (prev + 1 == c)
+                                state = ClassIterState{ .in_range = prev }
+                            else
+                                try writer.print(".{{.one='{'}'}}, ", .{
+                                    std.zig.fmtEscapes(&.{prev}),
+                                });
+                        },
                     }
-                    _ = try writer.write(", ");
+                    prev = c;
                 }
-                _ = try writer.write("}");
-                if (klass.negated) _ = try writer.write(",.negated = true");
-                _ = try writer.write("})");
+                _ = try writer.write("}))");
             },
             .dot => _ = try writer.write("pat.dot()"),
             .empty => _ = try writer.write("pat.empty()"),
@@ -568,12 +702,20 @@ pub const Pattern = union(enum) {
         res: *Result,
     ) void {
         const in = ctx.in;
+        const debugthis = false;
+        if (debugthis) {
+            std.debug.print("{}", .{in});
+            if (pat != .nonterm_id) std.debug.print("{}\n", .{pat});
+        }
+
         switch (pat) {
             .nonterm_id => |id| {
                 const prev_id = ctx.id;
                 defer ctx.id = prev_id;
                 ctx.id = id;
                 const p = Grammar.rules[id][1];
+                if (debugthis)
+                    std.debug.print("{s} {s}\n", .{ @tagName(Grammar.rules[id][0]), @tagName(p) });
                 p.run(Grammar, ctx, res);
             },
             .literal => |lit| {
@@ -587,14 +729,7 @@ pub const Pattern = union(enum) {
                     res.* = Result.err(in);
                     return;
                 };
-                const err = for (klass.sets) |set| {
-                    switch (set) {
-                        .one => |c| if (c == ic)
-                            break klass.negated,
-                        .range => |ab| if (ic -% ab[0] < ab[1] -% ab[0] + 1)
-                            break klass.negated,
-                    }
-                } else !klass.negated;
+                const err = klass.bitset.isSet(ic) == klass.negated;
                 res.* = if (err)
                     Result.err(in)
                 else
@@ -676,7 +811,7 @@ pub const Pattern = union(enum) {
     ) !void {
         try writer.print("{s}: ", .{@tagName(pat)});
         switch (pat) {
-            .literal => |s| _ = try writer.write(s),
+            .literal => |lit| _ = try writer.write(lit.ptr[0..lit.len]),
             .nonterm_id => |id| _ = try writer.print("nonterm_id={}", .{id}),
             .seq, .alt => |pats| _ = try writer.print("{}", .{pats.len}),
             .many,
