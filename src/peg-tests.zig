@@ -4,6 +4,7 @@ const pk = @import("parakeet");
 const peg = pk.peg;
 const parseString = peg.parseString;
 const Peg = @import("peg-parsers.zig");
+const pat = peg.Pattern;
 
 const talloc = testing.allocator;
 // var gpa = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 40 }){};
@@ -126,6 +127,7 @@ test "peg character class" {
     try checkSame(Peg.expression,
         \\[^\n"\\]
     );
+    try checkSame(Peg.expression, "[\\^a-z]");
 }
 
 test "peg misc" {
@@ -177,7 +179,6 @@ test "peg grammar" {
 
 // TODO move to pattern-test.zig
 test "pattern with negated character classes" {
-    const pat = pk.peg.Pattern;
     const Class = pk.peg.Expr.Class;
     // zig fmt: off
     const G = struct{
@@ -210,7 +211,7 @@ test "negated char class matches not char class" {
         .{ .one = '_' },
     }));
     inline for (.{ true, false }) |negated| {
-        const pat = comptime pk.peg.Pattern.class(&.{
+        const p = comptime pk.peg.Pattern.class(&.{
             .bitset = if (negated)
                 _pat.class.bitset.complement()
             else
@@ -234,18 +235,62 @@ test "negated char class matches not char class" {
         const G = struct {
             pub const NonTerminal = enum { c };
             pub const Rule = struct { NonTerminal, pk.peg.Pattern };
-            pub const rules = [_]Rule{.{ .c, pat }};
+            pub const rules = [_]Rule{.{ .c, p }};
         };
         inline for (expecteds) |expected| {
             const Ctx = pk.peg.Pattern.RunCtx;
             var ctx = Ctx.init(pk.input(expected[0]), 0, talloc);
             var r: pk.peg.Pattern.Result = undefined;
-            pat.run(G, &ctx, &r);
+            p.run(G, &ctx, &r);
             // std.debug.print("negated={} r={} expected=({s},{})\n", .{ negated, r, expected[0], expected[1] });
             try testing.expect((r.output == expected[1]) == negated);
             var ctx2 = Ctx.init(pk.input(expected[0]), 0, talloc);
             not_pat.run(G, &ctx2, &r);
             try testing.expect((r.output == expected[1]) == negated);
         }
+    }
+}
+
+fn expectFormat(expected: []const u8, comptime fmt: []const u8, args: anytype) !void {
+    const actual = try std.fmt.allocPrint(talloc, fmt, args);
+    defer talloc.free(actual);
+    try testing.expectEqualStrings(expected, actual);
+}
+
+test "invalid char class" {
+    var bitset = peg.Expr.Class.Set.initFull();
+    try testing.expectError(error.InvalidCharacterClass, Peg.maybeNegate(false, bitset));
+    try testing.expectError(error.InvalidCharacterClass, Peg.maybeNegate(true, bitset));
+    bitset.masks[0] = 0;
+    bitset.masks[1] = 1;
+    try testing.expectError(error.InvalidCharacterClass, Peg.maybeNegate(false, bitset));
+    try testing.expectError(error.InvalidCharacterClass, Peg.maybeNegate(true, bitset));
+    bitset.masks[1] = 0;
+    _ = try Peg.maybeNegate(false, bitset);
+    _ = try Peg.maybeNegate(true, bitset);
+    bitset.masks[2] = 0;
+    bitset.masks[3] = 1;
+    _ = try Peg.maybeNegate(false, bitset);
+    _ = try Peg.maybeNegate(true, bitset);
+    bitset.masks[3] = 0;
+    try testing.expectError(error.InvalidCharacterClass, Peg.maybeNegate(false, bitset));
+    try testing.expectError(error.InvalidCharacterClass, Peg.maybeNegate(true, bitset));
+}
+
+test "pattern optimizations" {
+    // !. => .eos
+    try testing.expectEqual(pat.Tag.eos, comptime pat.not(&pat.dot()));
+    { // "a" / [bc-e] => [a-e]
+        const p = pat.alt(&.{
+            pat.literal("a"),
+            pat.class(&peg.Expr.Class.init(&.{ .{ .one = 'b' }, .{ .range = .{ 'c', 'e' } } })),
+        });
+        try testing.expect(p == .class);
+        try expectFormat("[a-e]", "{}", .{p.class});
+    }
+    { // "a" => [a]
+        const p = comptime pat.literal("a");
+        try testing.expect(p == .class);
+        try expectFormat("[a]", "{}", .{p.class});
     }
 }

@@ -182,6 +182,7 @@ pub const Expr = union(enum) {
             '[' => '[',
             ']' => ']',
             '\\' => '\\',
+            '^' => '^',
             else => null,
         };
     }
@@ -202,6 +203,7 @@ pub const Expr = union(enum) {
             ']' => _ = try writer.write((if (tag == .class) "\\]" else "]")),
             '\\' => _ = try writer.write("\\\\"),
             '-' => _ = try writer.write((if (tag == .class) "\\-" else "-")),
+            '^' => _ = try writer.write((if (tag == .class) "\\^" else "^")),
             // TODO not sure isPrint() is the correct way to decide if 'c' needs
             // octal escaping
             else => if (std.ascii.isPrint(c))
@@ -589,19 +591,38 @@ pub const Pattern = union(enum) {
     pub const Tag = std.meta.Tag(Pattern);
 
     pub fn literal(comptime payload: []const u8) Pattern {
-        return .{ .literal = .{
-            .ptr = payload.ptr,
-            .len = @intCast(payload.len),
-        } };
+        // TODO somehow verify that this optmization if faster than the alternative
+        // maybe it would be better to add fixed length array literals?
+        comptime {
+            if (payload.len == 1) {
+                var bitset = Expr.Class.Set.initEmpty();
+                bitset.set(payload[0]);
+                return .{ .class = &.{ .bitset = bitset } };
+            }
+            return .{ .literal = .{
+                .ptr = payload.ptr,
+                .len = @intCast(payload.len),
+            } };
+        }
     }
     pub fn class(payload: *const Expr.Class) Pattern {
         return .{ .class = payload };
     }
-    pub fn alt(payload: []const Pattern) Pattern {
-        return .{ .alt = payload };
+    pub fn alt(comptime payload: []const Pattern) Pattern {
+        return comptime blk: {
+            break :blk if (combineAlt(payload)) |bitset|
+                .{ .class = &.{ .bitset = bitset } }
+            else
+                .{ .alt = payload };
+        };
     }
     pub fn seq(payload: []const Pattern) Pattern {
-        return .{ .seq = payload };
+        return comptime blk: {
+            break :blk if (combineSeq(payload)) |bitset|
+                .{ .class = &.{ .bitset = bitset } }
+            else
+                .{ .seq = payload };
+        };
     }
     pub fn many(payload: *const Pattern) Pattern {
         return .{ .many = payload };
@@ -612,11 +633,13 @@ pub const Pattern = union(enum) {
     pub fn opt(payload: *const Pattern) Pattern {
         return .{ .opt = payload };
     }
-    pub fn not(payload: *const Pattern) Pattern {
-        return if (payload.* == .dot)
-            .eos
-        else
-            .{ .not = payload };
+    pub fn not(comptime payload: *const Pattern) Pattern {
+        comptime {
+            return switch (payload.*) {
+                .dot => .eos,
+                else => .{ .not = payload },
+            };
+        }
     }
     pub fn amp(payload: *const Pattern) Pattern {
         return .{ .amp = payload };
@@ -640,12 +663,42 @@ pub const Pattern = union(enum) {
         return .{ .anychar = payload };
     }
 
-    pub const ParseError = error{
-        ParseFailure,
-        AllocatorRequired,
-        UnexpectedResult,
-    } ||
-        mem.Allocator.Error;
+    /// if all choices are charsets or single chars, return a class of the union
+    fn combineAlt(comptime pats: []const Pattern) ?Expr.Class.Set {
+        for (pats) |pat| {
+            if (!(pat == .class or
+                (pat == .literal and pat.literal.len == 1)))
+                return null;
+        }
+        var bitset = Expr.Class.Set.initEmpty();
+        for (pats) |pat| {
+            switch (pat) {
+                .class => |other| bitset.setUnion(other.bitset),
+                .literal => |lit| {
+                    std.debug.assert(lit.len == 1);
+                    bitset.set(lit.ptr[0]);
+                },
+                else => unreachable,
+            }
+        }
+        return bitset;
+    }
+
+    /// combine sequences of literals
+    fn combineSeq(comptime pats: []const Pattern) ?Pattern {
+        const ok = for (pats) |pat| {
+            if (!(pat == .literal or pat == .empty)) break false;
+        } else true;
+        if (!ok) return null;
+
+        var s: []const u8 = "";
+        for (pats) |pat| {
+            if (pat != .empty) s = s ++ pat.literal[0..pat.literal.len];
+        }
+        return .{ .literal = literal(s) };
+    }
+
+    pub const ParseError = pk.ParseError;
 
     pub const Result = struct {
         input: pk.Input,

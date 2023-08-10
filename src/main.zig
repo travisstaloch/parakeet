@@ -34,7 +34,7 @@ pub fn main() !void {
             @import("gen/zig-grammar.y.zig")
         else
             unreachable;
-        const opts = .{ .eval_branch_quota = 6000 };
+        const opts = .{ .eval_branch_quota = 8000 };
         const G = pg.Grammar(pk, opts);
         const start = nextArg(&args) orelse
             usage("missing argument: <start>", .{});

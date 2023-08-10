@@ -110,16 +110,20 @@ fn accCharsets(set: *Expr.Class.Set, cset: Charset) void {
     }
 }
 
-// returns error if more than 1/2 of non-negated class bits are set.
-fn maybeNegate(neg: bool, bitset: Expr.Class.Set) !Expr.Class.Set {
+/// returns error if zero or more than 1/2 of the class bits are set
+pub fn maybeNegate(neg: bool, bitset: Expr.Class.Set) !Expr.Class.Set {
     const count = bitset.count();
-    if (neg and count * 2 > Expr.Class.Set.bit_length) {
-        std.debug.print(
-            "error: negated character class must have less than " ++
-                " half of its bits set.  expected {} bits set.  found {}. " ++
-                "class={}",
-            .{ Expr.Class.Set.bit_length, count, Expr{ .class = .{ .bitset = bitset } } },
-        );
+    if (count * 2 > Expr.Class.Set.bit_length) {
+        if (!@import("builtin").is_test)
+            std.debug.print(
+                "error: character class must have less than half of its bits " ++
+                    "set.  expected at most {} bits set.  found {} bits set. ",
+                .{ Expr.Class.Set.bit_length / 2, count },
+            );
+        return error.InvalidCharacterClass;
+    } else if (count == 0) {
+        if (!@import("builtin").is_test)
+            std.debug.print("error: character class with 0 elements", .{});
         return error.InvalidCharacterClass;
     }
     return if (neg) bitset.complement() else bitset;
