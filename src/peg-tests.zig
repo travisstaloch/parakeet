@@ -288,9 +288,4 @@ test "pattern optimizations" {
         try testing.expect(p == .class);
         try expectFormat("[a-e]", "{}", .{p.class});
     }
-    { // "a" => [a]
-        const p = comptime pat.literal("a");
-        try testing.expect(p == .class);
-        try expectFormat("[a]", "{}", .{p.class});
-    }
 }

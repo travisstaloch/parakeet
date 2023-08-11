@@ -591,19 +591,10 @@ pub const Pattern = union(enum) {
     pub const Tag = std.meta.Tag(Pattern);
 
     pub fn literal(comptime payload: []const u8) Pattern {
-        // TODO somehow verify that this optmization if faster than the alternative
-        // maybe it would be better to add fixed length array literals?
-        comptime {
-            if (payload.len == 1) {
-                var bitset = Expr.Class.Set.initEmpty();
-                bitset.set(payload[0]);
-                return .{ .class = &.{ .bitset = bitset } };
-            }
-            return .{ .literal = .{
-                .ptr = payload.ptr,
-                .len = @intCast(payload.len),
-            } };
-        }
+        return .{ .literal = .{
+            .ptr = payload.ptr,
+            .len = @intCast(payload.len),
+        } };
     }
     pub fn class(payload: *const Expr.Class) Pattern {
         return .{ .class = payload };
@@ -618,8 +609,8 @@ pub const Pattern = union(enum) {
     }
     pub fn seq(payload: []const Pattern) Pattern {
         return comptime blk: {
-            break :blk if (combineSeq(payload)) |bitset|
-                .{ .class = &.{ .bitset = bitset } }
+            break :blk if (combineSeq(payload)) |pat|
+                pat
             else
                 .{ .seq = payload };
         };
@@ -693,9 +684,9 @@ pub const Pattern = union(enum) {
 
         var s: []const u8 = "";
         for (pats) |pat| {
-            if (pat != .empty) s = s ++ pat.literal[0..pat.literal.len];
+            if (pat != .empty) s = s ++ pat.literal.ptr[0..pat.literal.len];
         }
-        return .{ .literal = literal(s) };
+        return literal(s);
     }
 
     pub const ParseError = pk.ParseError;
@@ -777,7 +768,7 @@ pub const Pattern = union(enum) {
                 const p = Grammar.rules[id][1];
                 if (debugthis)
                     std.debug.print("{s} {s}\n", .{ @tagName(Grammar.rules[id][0]), @tagName(p) });
-                p.run(Grammar, ctx, res);
+                @call(.always_tail, run, .{ p, Grammar, ctx, res });
             },
             .literal => |lit| {
                 res.* = if (in.startsWith(lit.ptr[0..lit.len]))
@@ -873,6 +864,8 @@ pub const Pattern = union(enum) {
         switch (pat) {
             .literal => |lit| _ = try writer.write(lit.ptr[0..lit.len]),
             .nonterm_id => |id| _ = try writer.print("nonterm_id={}", .{id}),
+            .anychar => |s| try writer.print("anychar={s}", .{s}),
+            .class => |klass| try writer.print("{}", .{klass}),
             .seq, .alt => |pats| _ = try writer.print("{}", .{pats.len}),
             .many,
             .plus,
@@ -882,8 +875,6 @@ pub const Pattern = union(enum) {
             .eos, .empty => {},
             .not => _ = try writer.writeByte('!'),
             .amp => _ = try writer.writeByte('&'),
-            .anychar => |s| try writer.print("anychar={s}", .{s}),
-            .class => |klass| try writer.print("{}", .{klass}),
             .dot => _ = try writer.writeByte('.'),
         }
     }
