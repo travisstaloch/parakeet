@@ -140,7 +140,13 @@ pub const class = ps.char('[')
     .discardR(spacing);
 // zig fmt: on
 
-pub const primary = ps.choice(.{ ident, group, literal, class, dot });
+pub const memo = ps.seqMapAlloc(.{
+    ps.discardSeq(.{ ps.str("{{"), spacing }),
+    ps.ref(exprRef),
+    ps.discardSeq(.{ ps.str("}}"), spacing }),
+}, Expr.memo);
+
+pub const primary = ps.choice(.{ ident, group, literal, class, memo, dot });
 
 fn exprTag(comptime t: ?Expr.Tag) fn (u8) ?Expr.Tag {
     return struct {

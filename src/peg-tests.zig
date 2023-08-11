@@ -55,8 +55,12 @@ test "peg expression" {
         \\    / "\\u{" hex+ "}"
         \\    / "\\" ["'\\nrt]
     );
-    // groups with a single child don't need to be grouped
+    // group with a single child doesn't need to be grouped
     try check(Peg.expression, "( !Prefix )*", "!Prefix*");
+    // memo nodes
+    try checkSame(Peg.expression, "{{ a }}");
+    try checkSame(Peg.expression, "{{ a }}*");
+    try check(Peg.expression, "( {{ a }} )*", "{{ a }}*");
 }
 
 test "peg string literal" {

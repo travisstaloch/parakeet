@@ -31,6 +31,8 @@ pub fn main() !void {
             @import("gen/c.peg.zig")
         else if (comptime std.mem.eql(u8, grammar_opt, "json"))
             @import("gen/json.peg.zig")
+        else if (comptime std.mem.eql(u8, grammar_opt, "json_memo"))
+            @import("gen/json_memo.peg.zig")
         else
             unreachable;
         const opts = .{ .eval_branch_quota = 8000 };

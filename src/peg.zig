@@ -47,6 +47,7 @@ pub const Expr = union(enum) {
     star: *const Expr,
     plus: *const Expr,
     group: *const Expr,
+    memo: Memo,
     alt: []const Expr,
     seq: []const Expr,
     grammar: []const Def,
@@ -89,6 +90,7 @@ pub const Expr = union(enum) {
             return .{ .bitset = if (negated) bitset.complement() else bitset };
         }
     };
+    pub const Memo = struct { expr: *const Expr, id: u32 };
 
     pub fn deinit(e: Expr, allocator: mem.Allocator) void {
         switch (e) {
@@ -106,6 +108,10 @@ pub const Expr = union(enum) {
             },
             .litD, .litS => |s| allocator.free(s),
             .ident, .dot, .empty, .class => {},
+            .memo => |m| {
+                m.expr.deinit(allocator);
+                allocator.destroy(m.expr);
+            },
         }
     }
 
@@ -154,7 +160,14 @@ pub const Expr = union(enum) {
     pub fn class(bitset: Expr.Class.Set) Expr {
         return .{ .class = .{ .bitset = bitset } };
     }
-
+    var memoid: u32 = 0;
+    pub fn memo(e: Expr, mallocator: ?mem.Allocator) !Expr {
+        defer memoid += 1;
+        const allocator = mallocator orelse return error.AllocatorRequired;
+        const o = try allocator.create(Expr);
+        o.* = e;
+        return .{ .memo = .{ .expr = o, .id = memoid } };
+    }
     pub fn group(e: Expr, mallocator: ?mem.Allocator) !Expr {
         // if its a single node, just return it. only allow seq and alt nodes in group
         switch (e) {
@@ -353,6 +366,11 @@ pub const Expr = union(enum) {
                 _ = try writer.write("( ");
                 try ie.formatImpl(writer, depth + 1);
                 _ = try writer.write(" )");
+            },
+            .memo => |m| {
+                _ = try writer.write("{{ ");
+                try m.expr.formatImpl(writer, depth + 1);
+                _ = try writer.write(" }}");
             },
             .grammar => |ds| {
                 for (ds, 0..) |d, i| {
@@ -561,6 +579,11 @@ pub const Expr = union(enum) {
                 try ie.formatGenImpl(writer, depth + 1);
                 _ = try writer.write(")");
             },
+            .memo => |m| {
+                _ = try writer.write("pat.memo(");
+                try m.expr.formatGenImpl(writer, depth + 1);
+                try writer.print(", {})", .{m.id});
+            },
         }
     }
 };
@@ -578,6 +601,7 @@ pub const Pattern = union(enum) {
     not: *const Pattern,
     amp: *const Pattern,
     group: *const Pattern,
+    memo: Memo,
     nonterm_id: u32,
     dot,
     eos,
@@ -589,6 +613,7 @@ pub const Pattern = union(enum) {
     }
     pub const Literal = struct { ptr: [*]const u8, len: u32 };
     pub const Tag = std.meta.Tag(Pattern);
+    pub const Memo = struct { pat: *const Pattern, id: u32 };
 
     pub fn literal(comptime payload: []const u8) Pattern {
         return .{ .literal = .{
@@ -652,6 +677,9 @@ pub const Pattern = union(enum) {
     }
     pub fn anychar(payload: []const u8) Pattern {
         return .{ .anychar = payload };
+    }
+    pub fn memo(payload: *const Pattern, id: u32) Pattern {
+        return .{ .memo = .{ .pat = payload, .id = id } };
     }
 
     /// if all choices are charsets or single chars, return a class of the union
@@ -850,6 +878,10 @@ pub const Pattern = union(enum) {
                 if (res.output == .ok) return;
                 ctx.in.index = in.index;
                 res.* = Result.ok(in, in.range(0));
+            },
+            .memo => |m| {
+                // TODO: memoize
+                m.pat.run(Grammar, ctx, res);
             },
         }
     }
