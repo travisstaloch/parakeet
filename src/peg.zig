@@ -795,6 +795,8 @@ pub const Pattern = union(enum) {
         id: u32,
         allocator: mem.Allocator,
         memo: MemoTable = .{},
+        // TODO make void in non-debug builds, eventually remove.
+        nonterm_visit_counts: ?*anyopaque = null,
 
         pub fn init(
             in: pk.Input,
@@ -805,6 +807,8 @@ pub const Pattern = union(enum) {
         }
     };
 
+    const show_nonterm_visit_counts = false;
+
     pub fn parse(
         comptime Grammar: type,
         start_rule_id: u32,
@@ -813,9 +817,20 @@ pub const Pattern = union(enum) {
     ) Result {
         var in = pk.input(input);
         const allocator = opts.allocator orelse pk.failing_allocator;
+
+        const Counts = std.enums.EnumArray(Grammar.NonTerminal, usize);
+        var nonterm_visit_counts = Counts.initDefault(0, .{});
+
         var ctx = RunCtx.init(in, start_rule_id, allocator);
+        if (show_nonterm_visit_counts) ctx.nonterm_visit_counts = &nonterm_visit_counts;
         var result: Result = undefined;
         Grammar.rules[start_rule_id][1].run(Grammar, &ctx, &result);
+        if (show_nonterm_visit_counts) {
+            std.sort.insertion(usize, &nonterm_visit_counts.values, {}, std.sort.desc(usize));
+            for (std.meta.tags(Grammar.NonTerminal)) |tag| {
+                std.debug.print("{s}={}\n", .{ @tagName(tag), nonterm_visit_counts.get(tag) });
+            }
+        }
         return result;
     }
 
@@ -832,11 +847,27 @@ pub const Pattern = union(enum) {
         const debugthis = false;
         if (debugthis) {
             std.debug.print("{}", .{in});
-            if (pat != .nonterm_id) std.debug.print("{}\n", .{pat});
+            if (pat != .nonterm) std.debug.print("{}\n", .{pat});
         }
-
         switch (pat) {
-            .nonterm_id => |id| {
+            .nonterm => |id| {
+                if (show_nonterm_visit_counts) {
+                    const Counts = std.enums.EnumArray(Grammar.NonTerminal, usize);
+                    var nonterm_visit_counts = @as(?*Counts, @ptrCast(@alignCast(ctx.nonterm_visit_counts))) orelse
+                        unreachable;
+                    var timer = std.time.Timer.start() catch unreachable;
+                    const prev_id = ctx.id;
+                    defer ctx.id = prev_id;
+                    ctx.id = id;
+                    const p = Grammar.rules[id][1];
+                    if (debugthis)
+                        std.debug.print("{s} {s}\n", .{ @tagName(Grammar.rules[id][0]), @tagName(p) });
+                    defer {
+                        const ns = timer.read();
+                        nonterm_visit_counts.getPtr(@as(Grammar.NonTerminal, @enumFromInt(id))).* += ns;
+                    }
+                    p.run(Grammar, ctx, res);
+                } else {
                     const prev_id = ctx.id;
                     defer ctx.id = prev_id;
                     ctx.id = id;
@@ -844,6 +875,7 @@ pub const Pattern = union(enum) {
                     if (debugthis)
                         std.debug.print("{s} {s}\n", .{ @tagName(Grammar.rules[id][0]), @tagName(p) });
                     @call(.always_tail, run, .{ p, Grammar, ctx, res });
+                }
             },
             .literal => |lit| {
                 res.* = if (in.startsWith(lit.ptr[0..lit.len]))
