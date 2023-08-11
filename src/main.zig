@@ -83,8 +83,9 @@ pub fn main() !void {
         std.debug.print(fmt1 ++ " {d: >10.3} - {} bytes\n", .{ "size", std.fmt.fmtIntSizeBin(bytes_processed), bytes_processed });
         std.debug.print(fmt1 ++ " {: >10}\n", .{ "time", std.fmt.fmtDuration(ns) });
         const gb = (@as(f64, @floatFromInt(bytes_processed)) / (1024 * 1024 * 1024));
+        const mb = (@as(f64, @floatFromInt(bytes_processed)) / (1024 * 1024));
         const seconds = @as(f64, @floatFromInt(ns)) / std.time.ns_per_s;
-        std.debug.print(fmt1 ++ " {d: >10.3} GiB/s\n", .{ "speed", gb / seconds });
+        std.debug.print(fmt1 ++ "{d: >2.3} GiB/s - {d:.3} MiB/s\n", .{ "speed", gb / seconds, mb / seconds });
         std.debug.print("{s}\n", .{dashes});
         if (errcount > 0) std.os.exit(1);
     } else {
