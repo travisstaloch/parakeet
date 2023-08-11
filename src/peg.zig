@@ -450,7 +450,7 @@ pub const Expr = union(enum) {
                 );
             },
             .ident => |s| {
-                try writer.print("pat.nontermId(@intFromEnum(NonTerminal.{s}))", .{s});
+                try writer.print("pat.nonterm(@intFromEnum(NonTerminal.{s}))", .{s});
             },
             .litS, .litD => |s| {
                 _ = try writer.write("pat.literal(\"");
@@ -461,7 +461,6 @@ pub const Expr = union(enum) {
                 // here we must infer the difference between a range like [a-z]
                 // and lone characters like [az]
                 _ = try writer.write("pat.class(&Class.init(&.{");
-                // TODO optimize. if if all .one, use Pattern.anychar
                 const negated = klass.bitset.count() * 2 > Expr.Class.Set.bit_length;
                 if (negated) _ = try writer.write(".{.one = '^'},");
                 var iter = if (negated)
@@ -603,11 +602,10 @@ pub const Pattern = union(enum) {
     amp: *const Pattern,
     group: *const Pattern,
     memo: Memo,
-    nonterm_id: u32,
+    nonterm: u32,
     dot,
     eos,
     empty,
-    anychar: []const u8,
 
     comptime {
         std.debug.assert(24 == @sizeOf(Pattern));
@@ -626,20 +624,18 @@ pub const Pattern = union(enum) {
         return .{ .class = payload };
     }
     pub fn alt(comptime payload: []const Pattern) Pattern {
-        return comptime blk: {
-            break :blk if (combineAlt(payload)) |bitset|
-                .{ .class = &.{ .bitset = bitset } }
-            else
-                .{ .alt = payload };
-        };
+        return if (comptime combineAlt(payload)) |bitset|
+            .{ .class = &.{ .bitset = bitset } }
+        else if (comptime reduceAlt(payload)) |pat|
+            return pat
+        else
+            .{ .alt = payload };
     }
     pub fn seq(payload: []const Pattern) Pattern {
-        return comptime blk: {
-            break :blk if (combineSeq(payload)) |pat|
-                pat
-            else
-                .{ .seq = payload };
-        };
+        return comptime if (combineSeq(payload)) |pat|
+            pat
+        else
+            .{ .seq = payload };
     }
     pub fn many(payload: *const Pattern) Pattern {
         return .{ .many = payload };
@@ -664,11 +660,8 @@ pub const Pattern = union(enum) {
     pub fn group(payload: *const Pattern) Pattern {
         return .{ .group = payload };
     }
-    pub fn nonterm(payload: []const u8) Pattern {
+    pub fn nonterm(payload: u32) Pattern {
         return .{ .nonterm = payload };
-    }
-    pub fn nontermId(payload: usize) Pattern {
-        return .{ .nonterm_id = payload };
     }
     pub fn dot() Pattern {
         return .dot;
@@ -676,15 +669,12 @@ pub const Pattern = union(enum) {
     pub fn empty() Pattern {
         return .empty;
     }
-    pub fn anychar(payload: []const u8) Pattern {
-        return .{ .anychar = payload };
-    }
     pub fn memo(payload: *const Pattern, id: u32) Pattern {
         return .{ .memo = .{ .pat = payload, .id = id } };
     }
 
     /// if all choices are charsets or single chars, return a class of the union
-    fn combineAlt(comptime pats: []const Pattern) ?Expr.Class.Set {
+    fn combineAlt(pats: []const Pattern) ?Expr.Class.Set {
         for (pats) |pat| {
             if (!(pat == .class or
                 (pat == .literal and pat.literal.len == 1)))
@@ -702,6 +692,61 @@ pub const Pattern = union(enum) {
             }
         }
         return bitset;
+    }
+    fn lastOfSeq(pat: Pattern) ?Pattern {
+        if (pat != .seq) return null;
+        std.debug.assert(pat.seq.len > 1);
+        return pat.seq[pat.seq.len - 1];
+    }
+    pub fn eql(p: Pattern, other: Pattern) bool {
+        return @as(Tag, p) == @as(Tag, other) and switch (p) {
+            .literal => |s| pk.util.eql(s, other.literal),
+            .class => |klass| klass.bitset.eql(other.class.bitset),
+            .alt => |pats| pats.len == other.alt.len and for (pats, 0..) |subp, i| {
+                if (!subp.eql(other.alt[i])) break false;
+            } else true,
+            .seq => |pats| pats.len == other.seq.len and for (pats, 0..) |subp, i| {
+                if (!subp.eql(other.seq[i])) break false;
+            } else true,
+            inline .many,
+            .plus,
+            .opt,
+            .not,
+            .amp,
+            .group,
+            => |ip, tag| ip.eql(@field(other, @tagName(tag)).*),
+            .memo => |m| m.id == other.memo.id and m.pat.eql(other.memo.pat),
+            .nonterm => |id| id == other.nonterm,
+            .dot,
+            .eos,
+            .empty,
+            => true,
+        };
+    }
+    // TODO - add a pre-parsing step which optimizes patterns, preferably at
+    // comptime. that step needs to happen before this
+    /// when all arms of an alt end with the same pattern, it may be hoisted
+    /// out.  this results in less duplicated work.
+    /// a z / b z => (a / b) z
+    fn reduceAlt(comptime pats: []const Pattern) ?Pattern {
+        comptime {
+            std.debug.assert(pats.len > 1);
+            const z = lastOfSeq(pats[0]) orelse return null;
+            for (pats[1..]) |p| {
+                const z2 = lastOfSeq(p) orelse return null;
+                if (!z.eql(z2)) return null;
+            }
+            // reduce removing z from all seqs
+            var newpats: [pats.len]Pattern = undefined;
+            for (pats, 0..) |p, i|
+                // TODO other optimizations for single item?
+                // a c / b c / c => (a / b)? c
+                newpats[i] = if (p.seq.len == 2)
+                    p.seq[0]
+                else
+                    .{ .seq = p.seq[0 .. p.seq.len - 1] };
+            return seq(&.{ group(&alt(&newpats)), z });
+        }
     }
 
     /// combine sequences of literals into a single literal
@@ -743,12 +788,13 @@ pub const Pattern = union(enum) {
         }
     };
 
-    const debug = std.log.debug;
+    pub const MemoTable = std.AutoHashMapUnmanaged([2]u32, Result);
 
     pub const RunCtx = struct {
         in: pk.Input,
         id: u32,
         allocator: mem.Allocator,
+        memo: MemoTable = .{},
 
         pub fn init(
             in: pk.Input,
@@ -791,13 +837,13 @@ pub const Pattern = union(enum) {
 
         switch (pat) {
             .nonterm_id => |id| {
-                const prev_id = ctx.id;
-                defer ctx.id = prev_id;
-                ctx.id = id;
-                const p = Grammar.rules[id][1];
-                if (debugthis)
-                    std.debug.print("{s} {s}\n", .{ @tagName(Grammar.rules[id][0]), @tagName(p) });
-                @call(.always_tail, run, .{ p, Grammar, ctx, res });
+                    const prev_id = ctx.id;
+                    defer ctx.id = prev_id;
+                    ctx.id = id;
+                    const p = Grammar.rules[id][1];
+                    if (debugthis)
+                        std.debug.print("{s} {s}\n", .{ @tagName(Grammar.rules[id][0]), @tagName(p) });
+                    @call(.always_tail, run, .{ p, Grammar, ctx, res });
             },
             .literal => |lit| {
                 res.* = if (in.startsWith(lit.ptr[0..lit.len]))
@@ -820,7 +866,6 @@ pub const Pattern = union(enum) {
             else
                 Result.err(in),
             .empty => res.* = Result.ok(in, in.range(0)),
-            .anychar => @panic("TODO tag=anychar"),
             .seq => |pats| {
                 for (pats) |p| {
                     p.run(Grammar, ctx, res);
@@ -881,30 +926,58 @@ pub const Pattern = union(enum) {
                 res.* = Result.ok(in, in.range(0));
             },
             .memo => |m| {
-                // TODO: memoize
+                const gop = ctx.memo.getOrPut(
+                    ctx.allocator,
+                    .{ m.id, in.index },
+                ) catch |e| {
+                    res.* = Result.errWith(in, e);
+                    return;
+                };
+                // if (gop.found_existing)
+                //     std.debug.print("found existing memo entry\n", .{});
+                if (gop.found_existing) {
+                    res.* = gop.value_ptr.*;
+                    return;
+                }
                 m.pat.run(Grammar, ctx, res);
+                gop.value_ptr.* = res.*;
             },
         }
     }
 
     pub fn format(
         pat: Pattern,
-        comptime _: []const u8,
-        _: std.fmt.FormatOptions,
+        comptime fmt: []const u8,
+        opts: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        try writer.print("{s}: ", .{@tagName(pat)});
+        // try writer.print("{s}: ", .{@tagName(pat)});
         switch (pat) {
             .literal => |lit| _ = try writer.write(lit.ptr[0..lit.len]),
-            .nonterm_id => |id| _ = try writer.print("nonterm_id={}", .{id}),
-            .anychar => |s| try writer.print("anychar={s}", .{s}),
+            .nonterm => |id| _ = try writer.print("{}", .{id}),
             .class => |klass| try writer.print("{}", .{klass}),
-            .seq, .alt => |pats| _ = try writer.print("{}", .{pats.len}),
+            .alt => |pats| for (pats, 0..) |p, i| {
+                if (i != 0) _ = try writer.write(" / ");
+                try p.format(fmt, opts, writer);
+            },
+            .seq => |pats| for (pats, 0..) |p, i| {
+                if (i != 0) _ = try writer.write(" ");
+                try p.format(fmt, opts, writer);
+            },
             .many,
             .plus,
-            .group,
             .opt,
-            => |_| {},
+            => |ip| try ip.format(fmt, opts, writer),
+            .group => |ip| {
+                _ = try writer.write("( ");
+                try ip.format(fmt, opts, writer);
+                _ = try writer.write(" )");
+            },
+            .memo => |m| {
+                _ = try writer.write("{{ ");
+                try m.pat.format(fmt, opts, writer);
+                _ = try writer.write(" }}");
+            },
             .eos, .empty => {},
             .not => _ = try writer.writeByte('!'),
             .amp => _ = try writer.writeByte('&'),

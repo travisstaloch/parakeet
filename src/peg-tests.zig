@@ -190,11 +190,11 @@ test "pattern with negated character classes" {
         pub const Rule = struct { NonTerminal, pk.peg.Pattern };
         pub const rules = [_]Rule{
             .{ .line_comment, pat.alt(&.{pat.seq(&.{pat.literal("//"), pat.not(&pat.class(&Class.init(&.{.{.one='!'}, .{.one='/'}, }))), pat.many(&pat.class(&Class.init(&.{.{.one = '^'},.{.one='\n'}, }))), }), pat.seq(&.{pat.literal("////"), pat.many(&pat.class(&Class.init(&.{.{.one = '^'},.{.one='\n'}, }))), }), })},
-            .{ .skip, pat.many(&pat.group(&pat.alt(&.{pat.class(&Class.init(&.{.{.one='\n'}, .{.one=' '}, })), pat.nontermId(@intFromEnum(NonTerminal.line_comment)), })))},
+            .{ .skip, pat.many(&pat.group(&pat.alt(&.{pat.class(&Class.init(&.{.{.one='\n'}, .{.one=' '}, })), pat.nonterm(@intFromEnum(NonTerminal.line_comment)), })))},
             .{ .hex, pat.class(&Class.init(&.{.{.range=.{'0', '9'}}, }))},
-            .{ .char_escape, pat.alt(&.{pat.seq(&.{pat.literal("\\x"), pat.nontermId(@intFromEnum(NonTerminal.hex)), pat.nontermId(@intFromEnum(NonTerminal.hex)), }), pat.seq(&.{pat.literal("\\u{"), pat.plus(&pat.nontermId(@intFromEnum(NonTerminal.hex))), pat.literal("}"), }), pat.seq(&.{pat.literal("\\"), pat.class(&Class.init(&.{.{.one='"'}, .{.one='\''}, })), }), })},
-            .{ .string_char, pat.alt(&.{pat.nontermId(@intFromEnum(NonTerminal.char_escape)), pat.class(&Class.init(&.{.{.one = '^'},.{.one='\n'}, .{.one='"'}, })), })},
-            .{ .STRINGLITERALSINGLE, pat.seq(&.{pat.literal("\""), pat.many(&pat.nontermId(@intFromEnum(NonTerminal.string_char))), pat.literal("\""), pat.nontermId(@intFromEnum(NonTerminal.skip)), })},
+            .{ .char_escape, pat.alt(&.{pat.seq(&.{pat.literal("\\x"), pat.nonterm(@intFromEnum(NonTerminal.hex)), pat.nonterm(@intFromEnum(NonTerminal.hex)), }), pat.seq(&.{pat.literal("\\u{"), pat.plus(&pat.nonterm(@intFromEnum(NonTerminal.hex))), pat.literal("}"), }), pat.seq(&.{pat.literal("\\"), pat.class(&Class.init(&.{.{.one='"'}, .{.one='\''}, })), }), })},
+            .{ .string_char, pat.alt(&.{pat.nonterm(@intFromEnum(NonTerminal.char_escape)), pat.class(&Class.init(&.{.{.one = '^'},.{.one='\n'}, .{.one='"'}, })), })},
+            .{ .STRINGLITERALSINGLE, pat.seq(&.{pat.literal("\""), pat.many(&pat.nonterm(@intFromEnum(NonTerminal.string_char))), pat.literal("\""), pat.nonterm(@intFromEnum(NonTerminal.skip)), })},
         };
     };
     // zig fmt: on
@@ -291,5 +291,15 @@ test "pattern optimizations" {
         });
         try testing.expect(p == .class);
         try expectFormat("[a-e]", "{}", .{p.class});
+    }
+    { // a z / b z => (a / b) z
+        const p = pat.alt(&.{
+            pat.seq(&.{ pat.nonterm(0), pat.nonterm(2) }),
+            pat.seq(&.{ pat.nonterm(1), pat.nonterm(2) }),
+        });
+        try testing.expect(p == .seq);
+        try expectFormat(
+            \\( 0 / 1 ) 2
+        , "{}", .{p});
     }
 }

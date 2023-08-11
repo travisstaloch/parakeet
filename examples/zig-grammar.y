@@ -24,7 +24,8 @@ VarDecl <- (KEYWORD_const / KEYWORD_var) IDENTIFIER (COLON TypeExpr)? ByteAlign?
 
 ContainerField
     <- 
-       #doc_comment? KEYWORD_comptime? (IDENTIFIER (COLON TypeExpr)? / TypeExpr) ByteAlign? (EQUAL Expr)?
+       # TODO support tuple declarations. the following doesn't work
+       # doc_comment? KEYWORD_comptime? (IDENTIFIER (COLON TypeExpr)? / TypeExpr) ByteAlign? (EQUAL Expr)?
        doc_comment? KEYWORD_comptime? IDENTIFIER (COLON TypeExpr)? ByteAlign? (EQUAL Expr)?
      / doc_comment? KEYWORD_comptime? (IDENTIFIER COLON)? !KEYWORD_fn TypeExpr ByteAlign? (EQUAL Expr)?
 
@@ -560,7 +561,7 @@ KEYWORD_var         <- 'var'         end_of_word
 KEYWORD_volatile    <- 'volatile'    end_of_word
 KEYWORD_while       <- 'while'       end_of_word
 
-keyword <- KEYWORD_addrspace / KEYWORD_align / KEYWORD_allowzero / KEYWORD_and
+keyword <- {{KEYWORD_addrspace / KEYWORD_align / KEYWORD_allowzero / KEYWORD_and
          / KEYWORD_anyframe / KEYWORD_anytype / KEYWORD_asm / KEYWORD_async
          / KEYWORD_await / KEYWORD_break / KEYWORD_callconv / KEYWORD_catch
          / KEYWORD_comptime / KEYWORD_const / KEYWORD_continue / KEYWORD_defer
@@ -571,4 +572,4 @@ keyword <- KEYWORD_addrspace / KEYWORD_align / KEYWORD_allowzero / KEYWORD_and
          / KEYWORD_pub / KEYWORD_resume / KEYWORD_return / KEYWORD_linksection
          / KEYWORD_struct / KEYWORD_suspend / KEYWORD_switch / KEYWORD_test
          / KEYWORD_threadlocal / KEYWORD_try / KEYWORD_union / KEYWORD_unreachable
-         / KEYWORD_usingnamespace / KEYWORD_var / KEYWORD_volatile / KEYWORD_while
+         / KEYWORD_usingnamespace / KEYWORD_var / KEYWORD_volatile / KEYWORD_while}}
