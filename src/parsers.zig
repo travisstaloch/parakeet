@@ -211,6 +211,23 @@ pub fn satisfy(comptime f: fn (u8) bool) ByteParser {
     };
 }
 
+/// succeeds with return value of 'f' when it is not null
+pub fn satisfyOpt(comptime f: fn (u8) ?u8) ByteParser {
+    return .{
+        .runFn = struct {
+            fn run(_: ByteParser, i: Input, _: Options) ByteParser.Result {
+                const ic = i.get(0) orelse return ByteParser.err(i, .{});
+                return if (f(ic)) |fc|
+                    ByteParser.ok(i.advanceBy(1), fc, .{})
+                else
+                    ByteParser.err(i, .{});
+            }
+        }.run,
+        .fail_handler = default_fail_handler,
+        .type = .satisfyOpt,
+    };
+}
+
 /// succeeds with next byte if within the inclusive range [a..b)
 pub fn charRange(comptime a: u8, comptime b: u8) ByteParser {
     return .{

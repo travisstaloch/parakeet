@@ -12,17 +12,15 @@ pub const comment = ps.char('#')
     .discardL(ps.until(ps.takeWhile(ps.anychar, .{}), eol).discardR(eol));
 pub const spacing = ps.takeWhile(ps.choice(.{ space, comment }), .{});
 
-pub const ident_str = ps.scanString(usize, 0, struct {
-    fn func(i: usize, c: u8) ?usize {
-        const cont = if (i == 0)
-            std.ascii.isAlphabetic(c)
-        else
-            std.ascii.isAlphabetic(c) or std.ascii.isDigit(c) or c == '_';
-        // std.debug.print("ident i={} c={c} cont={}\n", .{ i, c, cont });
-        return if (cont) i + 1 else null;
-    }
-}.func)
+// zig fmt: off
+pub const ident_str = ps.seq(.{
+        ps.satisfy(std.ascii.isAlphabetic), 
+        ps.choice(.{ ps.satisfy(std.ascii.isAlphanumeric), ps.char('_') })
+            .takeWhile(.{}) 
+    })
+    .asStr()
     .discardR(spacing);
+// zig fmt: on
 
 pub const ident = ident_str.map(Expr.initFn(.ident));
 
@@ -33,22 +31,7 @@ pub const group = ps.seq(.{
 })
     .mapAlloc(Expr.group);
 
-pub const escape: pk.ByteParser = .{
-    .runFn = struct {
-        const P = pk.ByteParser;
-        fn run(_: P, i: pk.Input, _: pk.Options) P.Result {
-            const c = i.get(0) orelse return P.err(i, .{});
-            // std.debug.print("esc c={c}\n", .{c});
-            return if (Expr.escape(c)) |e|
-                P.ok(i.advanceBy(1), e, .{})
-            else
-                P.err(i, .{});
-        }
-    }.run,
-    .fail_handler = pk.default_fail_handler,
-    .type = .char,
-};
-
+pub const escape = ps.satisfyOpt(Expr.escape);
 pub const bslash = ps.char('\\');
 pub const bslash_dash = bslash.discardL(ps.char('-'));
 pub const octal = bslash.discardL(ps.int(u8, .{ .max = 3 }, 8));

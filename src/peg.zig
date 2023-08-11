@@ -125,10 +125,7 @@ pub const Expr = union(enum) {
             }
         }.func;
     }
-    pub const PlusRes = struct {
-        Expr,
-        []const Expr,
-    };
+    pub const PlusRes = struct { Expr, []const Expr };
     pub fn initPlusRes(e: Expr, es: []const Expr) PlusRes {
         return .{ e, es };
     }
@@ -244,6 +241,8 @@ pub const Expr = union(enum) {
         switch (e) {
             .litS, .litD => |s| for (s) |c| try unescapeByte(c, writer, e),
             .class => |klass| {
+                // here we must infer the difference between a range like [a-z]
+                // and lone characters like [az]
                 const negated = klass.bitset.count() * 2 > Expr.Class.Set.bit_length;
                 if (negated) try writer.writeByte('^');
                 var iter = if (negated)
@@ -459,6 +458,8 @@ pub const Expr = union(enum) {
                 _ = try writer.write("\")");
             },
             .class => |klass| {
+                // here we must infer the difference between a range like [a-z]
+                // and lone characters like [az]
                 _ = try writer.write("pat.class(&Class.init(&.{");
                 // TODO optimize. if if all .one, use Pattern.anychar
                 const negated = klass.bitset.count() * 2 > Expr.Class.Set.bit_length;
@@ -703,7 +704,7 @@ pub const Pattern = union(enum) {
         return bitset;
     }
 
-    /// combine sequences of literals
+    /// combine sequences of literals into a single literal
     fn combineSeq(comptime pats: []const Pattern) ?Pattern {
         const ok = for (pats) |pat| {
             if (!(pat == .literal or pat == .empty)) break false;
@@ -772,9 +773,9 @@ pub const Pattern = union(enum) {
         return result;
     }
 
-    // run() is recursive so it is optimized to reduce fn call overhead, passing
-    // 'ctx' and 'res' by pointer. because of this, they are often reused below
-    // and some control flow may be sligntly non-intuitive.
+    // run() is recursive so it is optimized to reduce fn call overhead by
+    // passing 'ctx' and 'res' as pointers. because of this, they are often
+    //  reused below and some control flow may be sligntly non-intuitive.
     pub fn run(
         pat: Pattern,
         comptime Grammar: type,
