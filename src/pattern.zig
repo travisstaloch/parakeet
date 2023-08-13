@@ -87,7 +87,7 @@ pub const Pattern = union(enum) {
         opts: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        return formatImpl(Pattern, @TypeOf(writer).Error, p, fmt, opts, writer);
+        return formatImpl(Pattern, @TypeOf(writer).Error, p, fmt, opts, writer, 0);
     }
 
     pub fn literal(payload: []const u8) Pattern {
@@ -208,7 +208,6 @@ pub const Pattern = union(enum) {
             .opt,
             .not,
             .amp,
-            .group,
             => |ip, tag| eql(ip.*, @field(other, @tagName(tag)).*),
             .memo => |m| m.id == other.memo.id and eql(m.pat.*, other.memo.pat.*),
             .nonterm => |id| id == other.nonterm,
@@ -240,10 +239,8 @@ pub const Pattern = union(enum) {
                 .{ .seq = tmp[0 .. tmp.len - 1] };
         }
 
-        const newalt = try arena.create(PatternMut);
-        newalt.* = .{ .alt = pats };
         const newseq = try arena.alloc(PatternMut, 2);
-        newseq[0] = .{ .group = newalt };
+        newseq[0] = .{ .alt = pats };
         newseq[1] = z;
 
         return .{ .seq = newseq };
@@ -300,12 +297,15 @@ pub const Pattern = union(enum) {
                     r[i] = try optimizeImpl(G, pats[i], depth + 1, arena, mode);
                 return .{ .seq = r };
             },
-            inline .not, .amp, .opt, .many, .plus, .group => |p, tag| {
+            inline .not, .amp, .opt, .many, .plus => |p, tag| {
                 const r = try arena.create(PatternMut);
                 r.* = try optimizeImpl(G, p.*, depth, arena, mode);
                 return @unionInit(PatternMut, @tagName(tag), r);
             },
-            inline .literal, .class => |p, tag| return @unionInit(PatternMut, @tagName(tag), p),
+            .group => |p| return try optimizeImpl(G, p.*, depth, arena, mode),
+            inline .literal, .class => |p, tag| {
+                return @unionInit(PatternMut, @tagName(tag), p);
+            },
             .nonterm => |id| return if (depth < 2)
                 try optimizeImpl(G, G.rules[id].pattern, depth + 1, arena, mode)
             else
@@ -374,7 +374,6 @@ pub const PatternMut = union(enum) {
     opt: *PatternMut,
     not: *PatternMut,
     amp: *PatternMut,
-    group: *PatternMut,
     memo: Memo,
     nonterm: u32,
     dot,
@@ -393,7 +392,7 @@ pub const PatternMut = union(enum) {
         opts: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        return formatImpl(PatternMut, @TypeOf(writer).Error, p, fmt, opts, writer);
+        return formatImpl(PatternMut, @TypeOf(writer).Error, p, fmt, opts, writer, 0);
     }
 
     // run() is recursive so it is optimized to reduce fn call overhead by
@@ -495,7 +494,6 @@ pub const PatternMut = union(enum) {
                 }
                 res.* = Result.ok(ctx.input, in.rangeTo(ctx.input.index));
             },
-            .group => |p| p.run(G, ctx, res),
             .not => |p| {
                 p.run(G, ctx, res);
                 ctx.input.index = in.index;
@@ -547,6 +545,7 @@ fn formatImpl(
     comptime fmt: []const u8,
     opts: std.fmt.FormatOptions,
     writer: anytype,
+    depth: u8,
 ) E!void {
     // try writer.print("{s}: ", .{@tagName(pat)});
     switch (pat) {
@@ -557,36 +556,44 @@ fn formatImpl(
         },
         .nonterm => |id| _ = try writer.print("{}", .{id}),
         .class => |klass| try writer.print("{}", .{klass}),
-        .alt => |pats| for (pats, 0..) |p, i| {
-            if (i != 0) _ = try writer.write(" / ");
-            try p.format(fmt, opts, writer);
+        .alt => |pats| {
+            if (depth != 0) _ = try writer.write("( ");
+            for (pats, 0..) |p, i| {
+                if (i != 0) _ = try writer.write(" / ");
+                try formatImpl(Pat, E, p, fmt, opts, writer, depth + 1);
+            }
+            if (depth != 0) _ = try writer.write(" )");
         },
         .seq => |pats| for (pats, 0..) |p, i| {
-            if (i != 0) _ = try writer.write(" ");
-            try p.format(fmt, opts, writer);
+            if (i != 0) try writer.writeByte(' ');
+            try formatImpl(Pat, E, p, fmt, opts, writer, depth + 1);
         },
-        .many,
-        .plus,
-        .opt,
-        => |ip| try ip.format(fmt, opts, writer),
-        .group => |ip| {
-            _ = try writer.write("( ");
-            try ip.format(fmt, opts, writer);
-            _ = try writer.write(" )");
+        .many => |ip| {
+            try formatImpl(Pat, E, ip.*, fmt, opts, writer, depth);
+            try writer.writeByte('*');
+        },
+        .plus => |ip| {
+            try formatImpl(Pat, E, ip.*, fmt, opts, writer, depth);
+            try writer.writeByte('+');
+        },
+        .opt => |ip| {
+            try formatImpl(Pat, E, ip.*, fmt, opts, writer, depth);
+            try writer.writeByte('?');
         },
         .memo => |m| {
             _ = try writer.write("{{ ");
-            try m.pat.format(fmt, opts, writer);
+            try formatImpl(Pat, E, m.pat.*, fmt, opts, writer, depth);
             _ = try writer.write(" }}");
         },
-        .eos, .empty => {},
+        .eos => _ = try writer.write("!."),
+        .empty => {},
         .not => |ip| {
             _ = try writer.writeByte('!');
-            try ip.format(fmt, opts, writer);
+            try formatImpl(Pat, E, ip.*, fmt, opts, writer, depth);
         },
         .amp => |ip| {
             _ = try writer.writeByte('&');
-            try ip.format(fmt, opts, writer);
+            try formatImpl(Pat, E, ip.*, fmt, opts, writer, depth);
         },
         .dot => _ = try writer.writeByte('.'),
     }
