@@ -19,6 +19,7 @@ jobs:
         with:
           version: master
       - run: zig build test -Doptimize=${{ matrix.optimize }} --summary all
+      - run: scripts/test-all.sh
   lint:
     runs-on: ubuntu-latest
     steps:
