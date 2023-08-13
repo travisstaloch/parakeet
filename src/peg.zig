@@ -428,6 +428,7 @@ pub const Expr = union(enum) {
                     \\
                     \\    const P = pk.pattern.Pattern;
                     \\    const Class = pk.peg.Expr.Class;
+                    \\    const nonterm = Rule.nonterm;
                     \\    fn _rules() [rules_len]Rule {
                     \\        @setEvalBranchQuota(options.eval_branch_quota);
                     \\        return [_]Rule{
@@ -435,9 +436,9 @@ pub const Expr = union(enum) {
                 );
                 for (rules) |rule| {
                     try writer.writeByteNTimes(' ', 8);
-                    try writer.print(".{{ .{s}, ", .{rule[0]});
+                    try writer.print("Rule.init(.{s}, ", .{rule[0]});
                     try rule[1].formatGenImpl(writer, depth);
-                    _ = try writer.write("},\n");
+                    _ = try writer.write("),\n");
                 }
                 _ = try writer.write(
                     \\        };
@@ -449,7 +450,7 @@ pub const Expr = union(enum) {
                 );
             },
             .ident => |s| {
-                try writer.print("P.nonterm(@intFromEnum(NonTerminal.{s}))", .{s});
+                try writer.print("nonterm(.{s})", .{s});
             },
             .litS, .litD => |s| {
                 _ = try writer.write("P.literal(\"");

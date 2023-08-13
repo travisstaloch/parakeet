@@ -30,8 +30,8 @@ pub const MemoTable = std.AutoHashMapUnmanaged([2]u32, Result);
 
 pub fn ParseContext(comptime G: type) type {
     return struct {
-        in: pk.Input,
-        id: u32,
+        input: pk.Input,
+        rule_id: u32,
         allocator: mem.Allocator,
         rules: [*]const Rule(G.NonTerminal, PatternMut),
         memo: MemoTable = .{},
@@ -48,8 +48,8 @@ pub fn ParseContext(comptime G: type) type {
             return .{
                 .allocator = arena,
                 .rules = rules.ptr,
-                .in = undefined,
-                .id = undefined,
+                .input = undefined,
+                .rule_id = undefined,
             };
         }
     };
@@ -145,20 +145,24 @@ pub const Pattern = union(enum) {
         start_rule_id: u32,
         input: []const u8,
     ) Result {
-        ctx.in = pk.input(input);
-        ctx.id = start_rule_id;
+        ctx.input = pk.input(input);
+        ctx.rule_id = start_rule_id;
 
         const Counts = std.enums.EnumArray(G.NonTerminal, usize);
         var nonterm_visit_counts = Counts.initDefault(0, .{});
         if (show_nonterm_visit_counts) ctx.nonterm_visit_counts = &nonterm_visit_counts;
+
         var result: Result = undefined;
-        ctx.rules[ctx.id][1].run(G, ctx, &result);
+        const rule = ctx.rules[ctx.rule_id].pattern;
+        rule.run(G, ctx, &result);
+
         if (show_nonterm_visit_counts) {
             std.sort.insertion(usize, &nonterm_visit_counts.values, {}, std.sort.desc(usize));
             for (std.meta.tags(G.NonTerminal)) |tag| {
                 std.debug.print("{s}={}\n", .{ @tagName(tag), nonterm_visit_counts.get(tag) });
             }
         }
+
         return result;
     }
 
@@ -303,7 +307,7 @@ pub const Pattern = union(enum) {
             },
             inline .literal, .class => |p, tag| return @unionInit(PatternMut, @tagName(tag), p),
             .nonterm => |id| return if (depth < 2)
-                try optimizeImpl(G, G.rules[id][1], depth + 1, arena, mode)
+                try optimizeImpl(G, G.rules[id].pattern, depth + 1, arena, mode)
             else
                 .{ .nonterm = id },
             .dot => return .dot,
@@ -331,9 +335,9 @@ pub const Pattern = union(enum) {
     ) ![]const Rule(G.NonTerminal, PatternMut) {
         const rules = try arena.alloc(Rule(G.NonTerminal, PatternMut), G.rules.len);
         for (0..G.rules.len) |i| {
-            rules[i][0] = G.rules[i][0];
-            // std.debug.print("rule={s}\n", .{@tagName(rule[0])});
-            rules[i][1] = try optimizeImpl(G, G.rules[i][1], 0, arena, mode);
+            rules[i].rule_id = G.rules[i].rule_id;
+            // std.debug.print("rule={s}\n", .{@tagName(rule.rule_id)});
+            rules[i].pattern = try optimizeImpl(G, G.rules[i].pattern, 0, arena, mode);
         }
         return rules;
     }
@@ -342,7 +346,21 @@ pub const Pattern = union(enum) {
 const show_nonterm_visit_counts = false;
 
 pub fn Rule(comptime NonTerminal: type, comptime Pat: type) type {
-    return struct { NonTerminal, Pat };
+    return struct {
+        rule_id: NonTerminal,
+        pattern: Pat,
+
+        pub fn init(rule_id: NonTerminal, pattern: Pat) @This() {
+            return .{
+                .rule_id = rule_id,
+                .pattern = pattern,
+            };
+        }
+
+        pub fn nonterm(nt: NonTerminal) Pattern {
+            return Pattern.nonterm(@intFromEnum(nt));
+        }
+    };
 }
 
 /// a data format similar to Expr for running parsers
@@ -387,7 +405,7 @@ pub const PatternMut = union(enum) {
         ctx: *ParseContext(G),
         res: *Result,
     ) void {
-        const in = ctx.in;
+        const in = ctx.input;
         const debugthis = false;
         if (debugthis) {
             std.debug.print("{}", .{in});
@@ -400,24 +418,24 @@ pub const PatternMut = union(enum) {
                     var nonterm_visit_counts = @as(?*Counts, @ptrCast(@alignCast(ctx.nonterm_visit_counts))) orelse
                         unreachable;
                     var timer = std.time.Timer.start() catch unreachable;
-                    const prev_id = ctx.id;
-                    defer ctx.id = prev_id;
-                    ctx.id = id;
-                    const p = ctx.rules[id][1];
+                    const prev_id = ctx.rule_id;
+                    defer ctx.rule_id = prev_id;
+                    ctx.rule_id = id;
+                    const p = ctx.rules[id].pattern;
                     if (debugthis)
-                        std.debug.print("{s} {s}\n", .{ @tagName(ctx.rules[id][0]), @tagName(p) });
+                        std.debug.print("{s} {s}\n", .{ @tagName(ctx.rules[id].rule_id), @tagName(p) });
                     defer {
                         const ns = timer.read();
                         nonterm_visit_counts.getPtr(@as(G.NonTerminal, @enumFromInt(id))).* += ns;
                     }
                     p.run(G, ctx, res);
                 } else {
-                    const prev_id = ctx.id;
-                    defer ctx.id = prev_id;
-                    ctx.id = id;
-                    const p = ctx.rules[id][1];
+                    const prev_id = ctx.rule_id;
+                    defer ctx.rule_id = prev_id;
+                    ctx.rule_id = id;
+                    const p = ctx.rules[id].pattern;
                     if (debugthis)
-                        std.debug.print("{s} {s}\n", .{ @tagName(ctx.rules[id][0]), @tagName(p) });
+                        std.debug.print("{s} {s}\n", .{ @tagName(ctx.rules[id].rule_id), @tagName(p) });
                     @call(.always_tail, run, .{ p, G, ctx, res });
                 }
             },
@@ -446,13 +464,13 @@ pub const PatternMut = union(enum) {
                 for (pats) |p| {
                     p.run(G, ctx, res);
                     if (res.output == .err) return;
-                    ctx.in.index = res.input.index;
+                    ctx.input.index = res.input.index;
                 }
-                res.* = Result.ok(ctx.in, in.rangeTo(ctx.in.index));
+                res.* = Result.ok(ctx.input, in.rangeTo(ctx.input.index));
             },
             .alt => |pats| {
                 for (pats) |*p| {
-                    ctx.in.index = in.index;
+                    ctx.input.index = in.index;
                     p.run(G, ctx, res);
                     if (res.output == .ok) return;
                 }
@@ -461,26 +479,26 @@ pub const PatternMut = union(enum) {
             .many => |p| {
                 while (true) {
                     p.run(G, ctx, res);
-                    ctx.in.index = res.input.index;
+                    ctx.input.index = res.input.index;
                     if (res.output == .err) break;
                 }
-                res.* = Result.ok(ctx.in, in.rangeTo(ctx.in.index));
+                res.* = Result.ok(ctx.input, in.rangeTo(ctx.input.index));
             },
             .plus => |p| {
                 p.run(G, ctx, res);
-                ctx.in.index = res.input.index;
+                ctx.input.index = res.input.index;
                 if (res.output == .err) return;
                 while (true) {
                     p.run(G, ctx, res);
-                    ctx.in.index = res.input.index;
+                    ctx.input.index = res.input.index;
                     if (res.output == .err) break;
                 }
-                res.* = Result.ok(ctx.in, in.rangeTo(ctx.in.index));
+                res.* = Result.ok(ctx.input, in.rangeTo(ctx.input.index));
             },
             .group => |p| p.run(G, ctx, res),
             .not => |p| {
                 p.run(G, ctx, res);
-                ctx.in.index = in.index;
+                ctx.input.index = in.index;
                 res.* = if (res.output == .ok)
                     Result.err(in)
                 else
@@ -488,7 +506,7 @@ pub const PatternMut = union(enum) {
             },
             .amp => |p| {
                 p.run(G, ctx, res);
-                ctx.in.index = in.index;
+                ctx.input.index = in.index;
                 res.* = .{ .input = in, .output = res.output };
             },
             .eos => res.* = if (in.eos())
@@ -498,7 +516,7 @@ pub const PatternMut = union(enum) {
             .opt => |p| {
                 p.run(G, ctx, res);
                 if (res.output == .ok) return;
-                ctx.in.index = in.index;
+                ctx.input.index = in.index;
                 res.* = Result.ok(in, in.range(0));
             },
             .memo => |m| {
