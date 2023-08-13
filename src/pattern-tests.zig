@@ -23,9 +23,12 @@ test "pattern with negated character classes" {
         };
     };
     // zig fmt: on
-    const r = Pattern.parse(G, @intFromEnum(G.NonTerminal.STRINGLITERALSINGLE),
+    var arena = std.heap.ArenaAllocator.init(talloc);
+    defer arena.deinit();
+    var ctx = try pk.pattern.ParseContext(G).init(arena.allocator(), .optimized);
+    const r = Pattern.parse(G, &ctx, @intFromEnum(G.NonTerminal.STRINGLITERALSINGLE),
         \\"str"
-    , .{ .allocator = talloc }, .optimized);
+    );
     try testing.expect(r.output == .ok);
     try testing.expectEqualStrings(
         \\"str"
@@ -69,17 +72,17 @@ test "negated char class matches not char class" {
 
         var arena = std.heap.ArenaAllocator.init(talloc);
         defer arena.deinit();
-        const rules = try Pattern.optimize(G, arena.allocator(), .optimized);
-
+        var ctx = try pk.pattern.ParseContext(G).init(arena.allocator(), .optimized);
         inline for (expecteds) |expected| {
-            const Ctx = pk.pattern.RunCtx;
-            var ctx = Ctx.init(pk.input(expected[0]), 0, talloc);
             var r: pk.pattern.Result = undefined;
-            rules[0][1].run(G, rules, &ctx, &r);
+            ctx.in = pk.input(expected[0]);
+            ctx.id = 0;
+            ctx.rules[0][1].run(G, &ctx, &r);
             // std.debug.print("negated={} r={} expected=({s},{})\n", .{ negated, r, expected[0], expected[1] });
             try testing.expect((r.output == expected[1]) == negated);
-            var ctx2 = Ctx.init(pk.input(expected[0]), 0, talloc);
-            rules[1][1].run(G, rules, &ctx2, &r);
+            ctx.in = pk.input(expected[0]);
+            ctx.id = 0;
+            ctx.rules[1][1].run(G, &ctx, &r);
             try testing.expect((r.output == expected[1]) == negated);
         }
     }

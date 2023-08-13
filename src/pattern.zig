@@ -28,22 +28,32 @@ pub const Result = struct {
 
 pub const MemoTable = std.AutoHashMapUnmanaged([2]u32, Result);
 
-pub const RunCtx = struct {
-    in: pk.Input,
-    id: u32,
-    allocator: mem.Allocator,
-    memo: MemoTable = .{},
-    // TODO make void in non-debug builds, eventually remove.
-    nonterm_visit_counts: ?*anyopaque = null,
-
-    pub fn init(
+pub fn ParseContext(comptime G: type) type {
+    return struct {
         in: pk.Input,
         id: u32,
         allocator: mem.Allocator,
-    ) @This() {
-        return .{ .in = in, .id = id, .allocator = allocator };
-    }
-};
+        rules: [*]const Rule(G.NonTerminal, PatternMut),
+        memo: MemoTable = .{},
+        // TODO make void in non-debug builds, eventually remove.
+        nonterm_visit_counts: ?*anyopaque = null,
+
+        /// only initializes 'rules' field. 'in' and 'id' fields will be
+        /// initialized in Pattern.parse
+        pub fn init(
+            arena: mem.Allocator,
+            mode: Pattern.OptimizeMode,
+        ) !@This() {
+            const rules = try Pattern.optimize(G, arena, mode);
+            return .{
+                .allocator = arena,
+                .rules = rules.ptr,
+                .in = undefined,
+                .id = undefined,
+            };
+        }
+    };
+}
 
 pub const Literal = struct { ptr: [*]const u8, len: u32 };
 
@@ -131,25 +141,18 @@ pub const Pattern = union(enum) {
 
     pub fn parse(
         comptime G: type,
+        ctx: *ParseContext(G),
         start_rule_id: u32,
         input: []const u8,
-        opts: pk.Options,
-        mode: OptimizeMode,
     ) Result {
-        var in = pk.input(input);
-        const allocator = opts.allocator orelse pk.failing_allocator;
+        ctx.in = pk.input(input);
+        ctx.id = start_rule_id;
 
         const Counts = std.enums.EnumArray(G.NonTerminal, usize);
         var nonterm_visit_counts = Counts.initDefault(0, .{});
-
-        var ctx = RunCtx.init(in, start_rule_id, allocator);
         if (show_nonterm_visit_counts) ctx.nonterm_visit_counts = &nonterm_visit_counts;
         var result: Result = undefined;
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
-        const rules = pk.pattern.Pattern.optimize(G, arena.allocator(), mode) catch |e|
-            return Result.errWith(in, e);
-        rules[start_rule_id][1].run(G, rules, &ctx, &result);
+        ctx.rules[ctx.id][1].run(G, ctx, &result);
         if (show_nonterm_visit_counts) {
             std.sort.insertion(usize, &nonterm_visit_counts.values, {}, std.sort.desc(usize));
             for (std.meta.tags(G.NonTerminal)) |tag| {
@@ -381,8 +384,7 @@ pub const PatternMut = union(enum) {
     pub fn run(
         pat: PatternMut,
         comptime G: type,
-        rules: []const Rule(G.NonTerminal, PatternMut),
-        ctx: *RunCtx,
+        ctx: *ParseContext(G),
         res: *Result,
     ) void {
         const in = ctx.in;
@@ -401,22 +403,22 @@ pub const PatternMut = union(enum) {
                     const prev_id = ctx.id;
                     defer ctx.id = prev_id;
                     ctx.id = id;
-                    const p = rules[id][1];
+                    const p = ctx.rules[id][1];
                     if (debugthis)
-                        std.debug.print("{s} {s}\n", .{ @tagName(rules[id][0]), @tagName(p) });
+                        std.debug.print("{s} {s}\n", .{ @tagName(ctx.rules[id][0]), @tagName(p) });
                     defer {
                         const ns = timer.read();
                         nonterm_visit_counts.getPtr(@as(G.NonTerminal, @enumFromInt(id))).* += ns;
                     }
-                    p.run(G, rules, ctx, res);
+                    p.run(G, ctx, res);
                 } else {
                     const prev_id = ctx.id;
                     defer ctx.id = prev_id;
                     ctx.id = id;
-                    const p = rules[id][1];
+                    const p = ctx.rules[id][1];
                     if (debugthis)
-                        std.debug.print("{s} {s}\n", .{ @tagName(rules[id][0]), @tagName(p) });
-                    @call(.always_tail, run, .{ p, G, rules, ctx, res });
+                        std.debug.print("{s} {s}\n", .{ @tagName(ctx.rules[id][0]), @tagName(p) });
+                    @call(.always_tail, run, .{ p, G, ctx, res });
                 }
             },
             .literal => |lit| {
@@ -442,7 +444,7 @@ pub const PatternMut = union(enum) {
             .empty => res.* = Result.ok(in, in.range(0)),
             .seq => |pats| {
                 for (pats) |p| {
-                    p.run(G, rules, ctx, res);
+                    p.run(G, ctx, res);
                     if (res.output == .err) return;
                     ctx.in.index = res.input.index;
                 }
@@ -451,33 +453,33 @@ pub const PatternMut = union(enum) {
             .alt => |pats| {
                 for (pats) |*p| {
                     ctx.in.index = in.index;
-                    p.run(G, rules, ctx, res);
+                    p.run(G, ctx, res);
                     if (res.output == .ok) return;
                 }
                 res.* = Result.err(in);
             },
             .many => |p| {
                 while (true) {
-                    p.run(G, rules, ctx, res);
+                    p.run(G, ctx, res);
                     ctx.in.index = res.input.index;
                     if (res.output == .err) break;
                 }
                 res.* = Result.ok(ctx.in, in.rangeTo(ctx.in.index));
             },
             .plus => |p| {
-                p.run(G, rules, ctx, res);
+                p.run(G, ctx, res);
                 ctx.in.index = res.input.index;
                 if (res.output == .err) return;
                 while (true) {
-                    p.run(G, rules, ctx, res);
+                    p.run(G, ctx, res);
                     ctx.in.index = res.input.index;
                     if (res.output == .err) break;
                 }
                 res.* = Result.ok(ctx.in, in.rangeTo(ctx.in.index));
             },
-            .group => |p| p.run(G, rules, ctx, res),
+            .group => |p| p.run(G, ctx, res),
             .not => |p| {
-                p.run(G, rules, ctx, res);
+                p.run(G, ctx, res);
                 ctx.in.index = in.index;
                 res.* = if (res.output == .ok)
                     Result.err(in)
@@ -485,7 +487,7 @@ pub const PatternMut = union(enum) {
                     Result.ok(in, in.rangeTo(res.input.index));
             },
             .amp => |p| {
-                p.run(G, rules, ctx, res);
+                p.run(G, ctx, res);
                 ctx.in.index = in.index;
                 res.* = .{ .input = in, .output = res.output };
             },
@@ -494,7 +496,7 @@ pub const PatternMut = union(enum) {
             else
                 Result.err(in),
             .opt => |p| {
-                p.run(G, rules, ctx, res);
+                p.run(G, ctx, res);
                 if (res.output == .ok) return;
                 ctx.in.index = in.index;
                 res.* = Result.ok(in, in.range(0));
@@ -513,7 +515,7 @@ pub const PatternMut = union(enum) {
                     res.* = gop.value_ptr.*;
                     return;
                 }
-                m.pat.run(G, rules, ctx, res);
+                m.pat.run(G, ctx, res);
                 gop.value_ptr.* = res.*;
             },
         }
