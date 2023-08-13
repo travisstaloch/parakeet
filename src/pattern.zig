@@ -147,6 +147,7 @@ pub const Pattern = union(enum) {
     ) Result {
         ctx.input = pk.input(input);
         ctx.rule_id = start_rule_id;
+        ctx.memo.clearRetainingCapacity();
 
         const Counts = std.enums.EnumArray(G.NonTerminal, usize);
         var nonterm_visit_counts = Counts.initDefault(0, .{});
