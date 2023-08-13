@@ -22,6 +22,7 @@ const many = ps.many;
 
 test {
     _ = @import("peg-tests.zig");
+    _ = @import("pattern-tests.zig");
 }
 
 /// runs 'p' and checks for end of stream afterward, succeeds when input is at end of stream

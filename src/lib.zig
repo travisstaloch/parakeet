@@ -2,6 +2,7 @@ const std = @import("std");
 const mem = std.mem;
 pub const FailingAllocator = @import("FailingAllocator.zig");
 pub const parsers = @import("parsers.zig");
+pub const pattern = @import("pattern.zig");
 pub const peg = @import("peg.zig");
 pub const util = @import("util.zig");
 pub const build_options = @import("build_options");

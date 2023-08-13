@@ -1,7 +1,5 @@
 const std = @import("std");
 const pk = @import("parakeet");
-const peg = pk.peg;
-const Peg = @import("peg-parsers.zig");
 
 fn nextArg(args: *[]const [:0]const u8) ?[:0]const u8 {
     if (args.len == 0) return null;
@@ -56,7 +54,7 @@ pub fn main() !void {
         var timer = try std.time.Timer.start();
         for (files.items) |file| {
             // std.debug.print("path={s}\n", .{file[0]});
-            const r = peg.Pattern.parse(
+            const r = pk.pattern.Pattern.parse(
                 G,
                 @intFromEnum(start_id),
                 file[1],
@@ -97,7 +95,7 @@ pub fn main() !void {
         const file = try std.fs.cwd().openFile(filename, .{});
         defer file.close();
         const input = try file.readToEndAlloc(alloc, std.math.maxInt(u32));
-        const g = try peg.parseString(Peg.grammar, input, alloc);
+        const g = try pk.peg.parseString(pk.peg.parsers.grammar, input, alloc);
         try stdout.print("{}\n", .{g.fmtGen()});
     }
 }
