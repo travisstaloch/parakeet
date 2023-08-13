@@ -4,7 +4,7 @@ const pk = @import("parakeet");
 const peg = pk.peg;
 const parseString = peg.parseString;
 const Peg = @import("peg-parsers.zig");
-const pat = peg.Pattern;
+const Pattern = peg.Pattern;
 
 const talloc = testing.allocator;
 // var gpa = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 40 }){};
@@ -187,20 +187,20 @@ test "pattern with negated character classes" {
     // zig fmt: off
     const G = struct{
         pub const NonTerminal = enum { line_comment, skip, hex, char_escape, string_char, STRINGLITERALSINGLE };
-        pub const Rule = struct { NonTerminal, pk.peg.Pattern };
+        pub const Rule = pk.peg.Rule(NonTerminal, Pattern);
         pub const rules = [_]Rule{
-            .{ .line_comment, pat.alt(&.{pat.seq(&.{pat.literal("//"), pat.not(&pat.class(&Class.init(&.{.{.one='!'}, .{.one='/'}, }))), pat.many(&pat.class(&Class.init(&.{.{.one = '^'},.{.one='\n'}, }))), }), pat.seq(&.{pat.literal("////"), pat.many(&pat.class(&Class.init(&.{.{.one = '^'},.{.one='\n'}, }))), }), })},
-            .{ .skip, pat.many(&pat.group(&pat.alt(&.{pat.class(&Class.init(&.{.{.one='\n'}, .{.one=' '}, })), pat.nonterm(@intFromEnum(NonTerminal.line_comment)), })))},
-            .{ .hex, pat.class(&Class.init(&.{.{.range=.{'0', '9'}}, }))},
-            .{ .char_escape, pat.alt(&.{pat.seq(&.{pat.literal("\\x"), pat.nonterm(@intFromEnum(NonTerminal.hex)), pat.nonterm(@intFromEnum(NonTerminal.hex)), }), pat.seq(&.{pat.literal("\\u{"), pat.plus(&pat.nonterm(@intFromEnum(NonTerminal.hex))), pat.literal("}"), }), pat.seq(&.{pat.literal("\\"), pat.class(&Class.init(&.{.{.one='"'}, .{.one='\''}, })), }), })},
-            .{ .string_char, pat.alt(&.{pat.nonterm(@intFromEnum(NonTerminal.char_escape)), pat.class(&Class.init(&.{.{.one = '^'},.{.one='\n'}, .{.one='"'}, })), })},
-            .{ .STRINGLITERALSINGLE, pat.seq(&.{pat.literal("\""), pat.many(&pat.nonterm(@intFromEnum(NonTerminal.string_char))), pat.literal("\""), pat.nonterm(@intFromEnum(NonTerminal.skip)), })},
+            .{ .line_comment, Pattern.alt(&.{Pattern.seq(&.{Pattern.literal("//"), Pattern.not(&Pattern.class(&Class.init(&.{.{.one='!'}, .{.one='/'}, }))), Pattern.many(&Pattern.class(&Class.init(&.{.{.one = '^'},.{.one='\n'}, }))), }), Pattern.seq(&.{Pattern.literal("////"), Pattern.many(&Pattern.class(&Class.init(&.{.{.one = '^'},.{.one='\n'}, }))), }), })},
+            .{ .skip, Pattern.many(&Pattern.group(&Pattern.alt(&.{Pattern.class(&Class.init(&.{.{.one='\n'}, .{.one=' '}, })), Pattern.nonterm(@intFromEnum(NonTerminal.line_comment)), })))},
+            .{ .hex, Pattern.class(&Class.init(&.{.{.range=.{'0', '9'}}, }))},
+            .{ .char_escape, Pattern.alt(&.{Pattern.seq(&.{Pattern.literal("\\x"), Pattern.nonterm(@intFromEnum(NonTerminal.hex)), Pattern.nonterm(@intFromEnum(NonTerminal.hex)), }), Pattern.seq(&.{Pattern.literal("\\u{"), Pattern.plus(&Pattern.nonterm(@intFromEnum(NonTerminal.hex))), Pattern.literal("}"), }), Pattern.seq(&.{Pattern.literal("\\"), Pattern.class(&Class.init(&.{.{.one='"'}, .{.one='\''}, })), }), })},
+            .{ .string_char, Pattern.alt(&.{Pattern.nonterm(@intFromEnum(NonTerminal.char_escape)), Pattern.class(&Class.init(&.{.{.one = '^'},.{.one='\n'}, .{.one='"'}, })), })},
+            .{ .STRINGLITERALSINGLE, Pattern.seq(&.{Pattern.literal("\""), Pattern.many(&Pattern.nonterm(@intFromEnum(NonTerminal.string_char))), Pattern.literal("\""), Pattern.nonterm(@intFromEnum(NonTerminal.skip)), })},
         };
     };
     // zig fmt: on
-    const r = pk.peg.Pattern.parse(G, @intFromEnum(G.NonTerminal.STRINGLITERALSINGLE),
+    const r = Pattern.parse(G, @intFromEnum(G.NonTerminal.STRINGLITERALSINGLE),
         \\"str"
-    , .{ .allocator = talloc });
+    , .{ .allocator = talloc }, .optimized);
     try testing.expect(r.output == .ok);
     try testing.expectEqualStrings(
         \\"str"
@@ -208,21 +208,21 @@ test "pattern with negated character classes" {
 }
 
 test "negated char class matches not char class" {
-    const _pat = comptime pk.peg.Pattern.class(&pk.peg.Expr.Class.init(&.{
+    const _pat = comptime Pattern.class(&pk.peg.Expr.Class.init(&.{
         .{ .range = .{ 'a', 'z' } },
         .{ .range = .{ 'A', 'Z' } },
         .{ .range = .{ '0', '9' } },
         .{ .one = '_' },
     }));
     inline for (.{ true, false }) |negated| {
-        const p = comptime pk.peg.Pattern.class(&.{
+        const p = comptime Pattern.class(&.{
             .bitset = if (negated)
                 _pat.class.bitset.complement()
             else
                 _pat.class.bitset,
         });
         const not_pat = if (negated)
-            comptime pk.peg.Pattern.not(&_pat)
+            comptime Pattern.not(&_pat)
         else
             _pat;
 
@@ -237,19 +237,24 @@ test "negated char class matches not char class" {
             .{ "\xff", .ok },
         };
         const G = struct {
-            pub const NonTerminal = enum { c };
-            pub const Rule = struct { NonTerminal, pk.peg.Pattern };
-            pub const rules = [_]Rule{.{ .c, p }};
+            pub const NonTerminal = enum { c, d };
+            pub const Rule = pk.peg.Rule(NonTerminal, Pattern);
+            pub const rules = [_]Rule{ .{ .c, p }, .{ .d, not_pat } };
         };
+
+        var arena = std.heap.ArenaAllocator.init(talloc);
+        defer arena.deinit();
+        const rules = try Pattern.optimize(G, arena.allocator(), .optimized);
+
         inline for (expecteds) |expected| {
-            const Ctx = pk.peg.Pattern.RunCtx;
+            const Ctx = pk.peg.RunCtx;
             var ctx = Ctx.init(pk.input(expected[0]), 0, talloc);
-            var r: pk.peg.Pattern.Result = undefined;
-            p.run(G, &ctx, &r);
+            var r: pk.peg.Result = undefined;
+            rules[0][1].run(G, rules, &ctx, &r);
             // std.debug.print("negated={} r={} expected=({s},{})\n", .{ negated, r, expected[0], expected[1] });
             try testing.expect((r.output == expected[1]) == negated);
             var ctx2 = Ctx.init(pk.input(expected[0]), 0, talloc);
-            not_pat.run(G, &ctx2, &r);
+            rules[1][1].run(G, rules, &ctx2, &r);
             try testing.expect((r.output == expected[1]) == negated);
         }
     }
@@ -262,6 +267,7 @@ fn expectFormat(expected: []const u8, comptime fmt: []const u8, args: anytype) !
 }
 
 test "invalid char class" {
+    // should error when over 1/2 or 0 bits are set
     var bitset = peg.Expr.Class.Set.initFull();
     try testing.expectError(error.InvalidCharacterClass, Peg.maybeNegate(false, bitset));
     try testing.expectError(error.InvalidCharacterClass, Peg.maybeNegate(true, bitset));
@@ -283,23 +289,37 @@ test "invalid char class" {
 
 test "pattern optimizations" {
     // !. => .eos
-    try testing.expectEqual(pat.Tag.eos, comptime pat.not(&pat.dot()));
+    try testing.expectEqual(Pattern.Tag.eos, comptime Pattern.not(&Pattern.dot()));
     { // "a" / [bc-e] => [a-e]
-        const p = pat.alt(&.{
-            pat.literal("a"),
-            pat.class(&peg.Expr.Class.init(&.{ .{ .one = 'b' }, .{ .range = .{ 'c', 'e' } } })),
-        });
+        const G = struct {
+            pub const NonTerminal = enum { a };
+            pub const Rule = pk.peg.Rule(NonTerminal, Pattern);
+            pub const rules = [_]Rule{.{ .a, Pattern.alt(&.{
+                Pattern.literal("a"),
+                Pattern.class(&peg.Expr.Class.init(&.{ .{ .one = 'b' }, .{ .range = .{ 'c', 'e' } } })),
+            }) }};
+        };
+        var arena = std.heap.ArenaAllocator.init(talloc);
+        defer arena.deinit();
+        const rules = try Pattern.optimize(G, arena.allocator(), .optimized);
+        const p = rules[0][1];
         try testing.expect(p == .class);
         try expectFormat("[a-e]", "{}", .{p.class});
     }
-    { // a z / b z => (a / b) z
-        const p = pat.alt(&.{
-            pat.seq(&.{ pat.nonterm(0), pat.nonterm(2) }),
-            pat.seq(&.{ pat.nonterm(1), pat.nonterm(2) }),
-        });
+    { // a c / b c => (a / b) c
+        const G = struct {
+            pub const NonTerminal = enum { a, b, c };
+            pub const Rule = pk.peg.Rule(NonTerminal, Pattern);
+            pub const rules = [_]Rule{.{ .a, Pattern.alt(&.{
+                Pattern.seq(&.{ Pattern.nonterm(@intFromEnum(NonTerminal.a)), Pattern.nonterm(@intFromEnum(NonTerminal.c)) }),
+                Pattern.seq(&.{ Pattern.nonterm(@intFromEnum(NonTerminal.b)), Pattern.nonterm(@intFromEnum(NonTerminal.c)) }),
+            }) }};
+        };
+        var arena = std.heap.ArenaAllocator.init(talloc);
+        defer arena.deinit();
+        const rules = try Pattern.optimize(G, arena.allocator(), .optimized);
+        const p = rules[0][1];
         try testing.expect(p == .seq);
-        try expectFormat(
-            \\( 0 / 1 ) 2
-        , "{}", .{p});
+        try expectFormat("( 0 / 1 ) 2", "{}", .{p});
     }
 }

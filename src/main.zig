@@ -61,6 +61,7 @@ pub fn main() !void {
                 @intFromEnum(start_id),
                 file[1],
                 .{ .allocator = alloc },
+                .optimized,
             );
             if (r.output == .err) {
                 try stdout.print("parse {s} {s} input={}\n", .{ @tagName(r.output), file[0], r.input });
