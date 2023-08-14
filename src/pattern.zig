@@ -68,6 +68,7 @@ pub const Pattern = union(enum) {
     opt: *const Pattern,
     not: *const Pattern,
     amp: *const Pattern,
+    // TODO remove unnecessary
     group: *const Pattern,
     memo: Memo,
     nonterm: u32,
@@ -188,15 +189,19 @@ pub const Pattern = union(enum) {
         return bitset;
     }
 
-    fn lastOfSeq(pat: PatternMut) ?PatternMut {
+    fn firstOfSeq(pat: PatternMut) ?PatternMut {
         if (pat != .seq) return null;
-        std.debug.assert(pat.seq.len > 1);
-        return pat.seq[pat.seq.len - 1];
+        std.debug.assert(pat.seq.len > 0);
+        return pat.seq[0];
     }
 
     pub fn eql(p: PatternMut, other: PatternMut) bool {
-        return @as(PatternMut.Tag, p) == @as(PatternMut.Tag, other) and switch (p) {
-            .literal => |lit| pk.util.eql(lit.ptr[0..lit.len], other.literal.ptr[0..other.literal.len]),
+        return @as(PatternMut.Tag, p) == @as(PatternMut.Tag, other) and
+            switch (p) {
+            .literal => |lit| lit.len == other.literal.len and pk.util.eql(
+                lit.ptr[0..lit.len],
+                other.literal.ptr[0..other.literal.len],
+            ),
             .class => |klass| klass.bitset.eql(other.class.bitset),
             .alt => |pats| pats.len == other.alt.len and for (pats, 0..) |subp, i| {
                 if (!eql(subp, other.alt[i])) break false;
@@ -219,30 +224,45 @@ pub const Pattern = union(enum) {
         };
     }
 
-    /// when all arms of an alt end with the same pattern, it may be hoisted
+    /// ----
+    /// sequence operators can be distributed into choice operators on the left
+    /// ----
+    /// when all alt patterns start with a common pattern, it may be distributed
     /// out.  this results in less duplicated parsing work.
-    /// a z / b z => (a / b) z
+    /// A <- (e1 e2) / (e1 e3)
+    /// B <- e1 (e2 / e3)
+    /// A and B are equivalent. all patterns receive the same input in each.
+    ///
+    /// NOTE: this does not apply when all alt patterns _end_ with a common
+    /// pattern
+    /// A <- (e1 e3) / (e2 e3)
+    /// B <- (e1 / e2) e3
+    /// from https://bford.info/pub/lang/peg.pdf
+    /// In the expression (e1 / e2) e3, the failure of e3 causes the whole
+    /// expression to fail. In (e1 e3) / (e2 e3), however, the first instance of
+    /// e3 only causes the first alternative to fail; the second alternative
+    /// will then be tried, in which the e3 might succeed if e2 consumes a
+    /// different amount of input than e1 did.
     fn reduceAlt(pats: []PatternMut, arena: mem.Allocator) !?PatternMut {
+        // TODO hoist longest common sequence
         std.debug.assert(pats.len > 1);
-        const z = lastOfSeq(pats[0]) orelse return null;
+        const e1 = firstOfSeq(pats[0]) orelse return null;
         for (pats[1..]) |p| {
-            const z2 = lastOfSeq(p) orelse return null;
-            if (!eql(z, z2)) return null;
+            const e1b = firstOfSeq(p) orelse return null;
+            if (!eql(e1, e1b)) return null;
         }
-        // reduce by removing last pattern from all seqs
+        // reduce by removing first pattern from all seqs
         for (0..pats.len) |i| {
-            // TODO other optimizations for single item?
-            // a c / b c / c => (a / b)? c
             const tmp = pats[i].seq;
             pats[i] = if (tmp.len == 2)
-                tmp[0]
+                tmp[1]
             else
-                .{ .seq = tmp[0 .. tmp.len - 1] };
+                .{ .seq = tmp[1..] };
         }
 
         const newseq = try arena.alloc(PatternMut, 2);
-        newseq[0] = .{ .alt = pats };
-        newseq[1] = z;
+        newseq[0] = e1;
+        newseq[1] = .{ .alt = pats };
 
         return .{ .seq = newseq };
     }

@@ -135,13 +135,13 @@ test "pattern optimizations" {
         try testing.expect(p == .class);
         try expectFormat("[a-e]", "{}", .{p.class});
     }
-    { // a c / b c => (a / b) c
+    { // a b / a c => a (b / c)
         const G = struct {
             pub const NonTerminal = enum { a, b, c };
             pub const Rule = pk.pattern.Rule(NonTerminal, Pattern);
             pub const rules = [_]Rule{Rule.init(.a, Pattern.alt(&.{
+                Pattern.seq(&.{ Rule.nonterm(.a), Rule.nonterm(.b) }),
                 Pattern.seq(&.{ Rule.nonterm(.a), Rule.nonterm(.c) }),
-                Pattern.seq(&.{ Rule.nonterm(.b), Rule.nonterm(.c) }),
             }))};
         };
         var arena = std.heap.ArenaAllocator.init(talloc);
@@ -149,6 +149,6 @@ test "pattern optimizations" {
         const rules = try Pattern.optimize(G, arena.allocator(), .optimized);
         const p = rules[0].pattern;
         try testing.expect(p == .seq);
-        try expectFormat("( 0 / 1 ) 2", "{}", .{p});
+        try expectFormat("0 ( 1 / 2 )", "{}", .{p});
     }
 }
