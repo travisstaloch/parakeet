@@ -2,6 +2,8 @@ const std = @import("std");
 const mem = std.mem;
 const pk = @import("lib.zig");
 const Expr = pk.peg.Expr;
+const builtin = @import("builtin");
+const is_debug_mode = builtin.mode == .Debug;
 
 pub const Result = struct {
     input: pk.Input,
@@ -12,8 +14,10 @@ pub const Result = struct {
         // TODO perhaps change ok back to []const u8 now that run()
         // 'returns' by out pointer
         /// start and end indices for input.s
-        ok: [2]u32,
+        ok: Ok,
     };
+
+    pub const Ok = [2]u32;
 
     pub fn err(i: pk.Input) Result {
         return .{ .input = i, .output = .{ .err = error.ParseFailure } };
@@ -26,32 +30,66 @@ pub const Result = struct {
     }
 };
 
-pub const MemoTable = std.AutoHashMapUnmanaged([2]u32, Result);
+pub const MemoTable = std.AutoHashMapUnmanaged(Result.Ok, Result);
 
-pub fn ParseContext(comptime G: type) type {
+pub fn ParseContext(comptime Grammar: type, comptime CaptureHandler: type) type {
     return struct {
         input: pk.Input,
         rule_id: u32,
-        allocator: mem.Allocator,
         rules: [*]const Rule(G.NonTerminal, PatternMut),
         memo: MemoTable = .{},
-        // TODO make void in non-debug builds, eventually remove.
-        nonterm_visit_counts: ?*anyopaque = null,
-        nonterm_trail: std.BoundedArray(u8, 512) = .{},
+        allocator: mem.Allocator,
+        capture_handler: if (C == void) void else *CaptureHandler,
+        /// for debugging. a trail of nonterminal names
+        nonterm_trail: if (is_debug_mode)
+            std.BoundedArray(u8, 512)
+        else
+            void = if (is_debug_mode) .{} else {},
 
-        /// only initializes 'rules' field. 'in' and 'id' fields will be
-        /// initialized in Pattern.parse
-        pub fn init(
-            arena: mem.Allocator,
-            mode: Pattern.OptimizeMode,
-        ) !@This() {
-            const rules = try Pattern.optimize(G, arena, mode);
+        pub const Ctx = @This();
+        pub const G = Grammar;
+        pub const C = CaptureHandler;
+        pub const Options = struct {
+            allocator: mem.Allocator = pk.failing_allocator,
+            mode: Pattern.OptimizeMode = .optimized,
+            capture_handler: if (C == void) void else *C =
+                if (C == void) {} else undefined,
+        };
+
+        /// initializes 'rules' and 'allocator' fields. 'input' and 'rule_id'
+        /// will be set in Pattern.parse
+        pub fn init(options: Options) !Ctx {
+            const rules = try Pattern.optimize(
+                G,
+                options.allocator,
+                options.mode,
+            );
             return .{
-                .allocator = arena,
                 .rules = rules.ptr,
                 .input = undefined,
                 .rule_id = undefined,
+                .allocator = options.allocator,
+                .capture_handler = options.capture_handler,
             };
+        }
+
+        pub fn onCapture(ctx: *Ctx, capid: u32, ok: Result.Ok) !void {
+            const info = @typeInfo(CaptureHandler);
+            if (info == .Struct and @hasDecl(CaptureHandler, "onCapture")) {
+                // verify capture_handler.onCapture first param is a self pointer
+                const fninfo = @typeInfo(@TypeOf(CaptureHandler.onCapture));
+                const Param1 = fninfo.Fn.params[0].type.?;
+                if (Param1 != *CaptureHandler)
+                    @compileError("expected first parameter of " ++
+                        "CaptureHandler.onCapture() to be \n'*" ++
+                        @typeName(CaptureHandler) ++ "'.  found \n' " ++
+                        @typeName(Param1) ++ "'");
+                std.debug.assert(ok[0] <= ok[1]);
+                std.debug.assert(ok[1] <= ctx.input.len);
+                const s = ctx.input.s[ok[0]..ok[1]];
+                // std.debug.print("ok={},{} s={}\n", .{ ok[0], ok[1], s });
+                try ctx.capture_handler.onCapture(capid, s);
+            }
         }
     };
 }
@@ -68,7 +106,8 @@ pub const Pattern = union(enum) {
     opt: *const Pattern,
     not: *const Pattern,
     amp: *const Pattern,
-    memo: Memo,
+    memo: PatternId,
+    cap: PatternId,
     nonterm: u32,
     dot,
     eos,
@@ -78,7 +117,7 @@ pub const Pattern = union(enum) {
         std.debug.assert(24 == @sizeOf(Pattern));
     }
     pub const Tag = std.meta.Tag(Pattern);
-    pub const Memo = struct { pat: *const Pattern, id: u32 };
+    pub const PatternId = struct { pat: *const Pattern, id: u32 };
 
     pub fn format(
         p: Pattern,
@@ -131,10 +170,13 @@ pub const Pattern = union(enum) {
     pub fn memo(payload: *const Pattern, id: u32) Pattern {
         return .{ .memo = .{ .pat = payload, .id = id } };
     }
+    pub fn capture(payload: *const Pattern, id: u32) Pattern {
+        return .{ .cap = .{ .pat = payload, .id = id } };
+    }
 
     pub fn parse(
-        comptime G: type,
-        ctx: *ParseContext(G),
+        comptime Ctx: type,
+        ctx: *Ctx,
         start_rule_id: u32,
         input: []const u8,
     ) Result {
@@ -142,20 +184,9 @@ pub const Pattern = union(enum) {
         ctx.rule_id = start_rule_id;
         ctx.memo.clearRetainingCapacity();
 
-        const Counts = std.enums.EnumArray(G.NonTerminal, usize);
-        var nonterm_visit_counts = Counts.initDefault(0, .{});
-        if (show_nonterm_visit_counts) ctx.nonterm_visit_counts = &nonterm_visit_counts;
-
         var result: Result = undefined;
         const pat = ctx.rules[ctx.rule_id].pattern;
-        pat.run(G, ctx, &result);
-
-        if (show_nonterm_visit_counts) {
-            std.sort.insertion(usize, &nonterm_visit_counts.values, {}, std.sort.desc(usize));
-            for (std.meta.tags(G.NonTerminal)) |tag| {
-                debug("{s}={}\n", .{ @tagName(tag), nonterm_visit_counts.get(tag) });
-            }
-        }
+        pat.run(Ctx, ctx, &result);
 
         return result;
     }
@@ -206,7 +237,7 @@ pub const Pattern = union(enum) {
             .not,
             .amp,
             => |ip, tag| eql(ip.*, @field(other, @tagName(tag)).*),
-            .memo => |m| m.id == other.memo.id and eql(m.pat.*, other.memo.pat.*),
+            .memo, .cap => |m| m.id == other.memo.id and eql(m.pat.*, other.memo.pat.*),
             .nonterm => |id| id == other.nonterm,
             .dot,
             .eos,
@@ -324,14 +355,17 @@ pub const Pattern = union(enum) {
             .dot => return .dot,
             .empty => return .empty,
             .eos => return .eos,
-            .memo => |m| return .{ .memo = .{
-                .pat = blk: {
-                    const r = try arena.create(PatternMut);
-                    r.* = try optimizeImpl(G, m.pat.*, depth, arena, mode);
-                    break :blk r;
-                },
-                .id = m.id,
-            } },
+            inline .memo, .cap => |m, tag| {
+                const patid = PatternMut.PatternId{
+                    .pat = blk: {
+                        const r = try arena.create(PatternMut);
+                        r.* = try optimizeImpl(G, m.pat.*, depth, arena, mode);
+                        break :blk r;
+                    },
+                    .id = m.id,
+                };
+                return @unionInit(PatternMut, @tagName(tag), patid);
+            },
         };
     }
 
@@ -367,7 +401,7 @@ pub const Pattern = union(enum) {
             } else .nullable,
             .many, .opt, .not, .amp => .nullable,
             .eos, .empty => .nullable,
-            .memo => |m| nullability(G, m.pat.*, start_rule_id),
+            .memo, .cap => |m| nullability(G, m.pat.*, start_rule_id),
             .nonterm => |id| if (@as(G.NonTerminal, @enumFromInt(id)) == start_rule_id)
                 .unknown
             else
@@ -427,7 +461,7 @@ pub const Pattern = union(enum) {
                     first_set.bitset = c.bitset;
                 }
             },
-            .memo => |m| calcFirstSet(G, m.pat.*, first_set, start_rule_id),
+            .memo, .cap => |m| calcFirstSet(G, m.pat.*, first_set, start_rule_id),
             .nonterm => |id| {
                 if (@as(G.NonTerminal, @enumFromInt(id)) != start_rule_id) {
                     var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
@@ -441,8 +475,6 @@ pub const Pattern = union(enum) {
         // debug("calcFirstSet end {s}={} first_set={}\n", .{ @tagName(pat), pat, first_set.* });
     }
 };
-
-const show_nonterm_visit_counts = false;
 
 pub const Nullability = enum { unknown, non_nullable, nullable };
 
@@ -482,7 +514,8 @@ pub const PatternMut = union(enum) {
     opt: *PatternMut,
     not: *PatternMut,
     amp: *PatternMut,
-    memo: Memo,
+    memo: PatternId,
+    cap: PatternId,
     nonterm: u32,
     dot,
     eos,
@@ -492,7 +525,7 @@ pub const PatternMut = union(enum) {
         std.debug.assert(24 == @sizeOf(PatternMut));
     }
     pub const Tag = std.meta.Tag(PatternMut);
-    pub const Memo = struct { pat: *PatternMut, id: u32 };
+    pub const PatternId = struct { pat: *PatternMut, id: u32 };
 
     pub fn format(
         p: PatternMut,
@@ -508,8 +541,8 @@ pub const PatternMut = union(enum) {
     //  reused below and some control flow may be sligntly non-intuitive.
     pub fn run(
         pat: PatternMut,
-        comptime G: type,
-        ctx: *ParseContext(G),
+        comptime Ctx: type,
+        ctx: *Ctx,
         res: *Result,
     ) void {
         const in = ctx.input;
@@ -520,56 +553,38 @@ pub const PatternMut = union(enum) {
         }
         switch (pat) {
             .nonterm => |id| {
-                if (show_nonterm_visit_counts) {
-                    const Counts = std.enums.EnumArray(G.NonTerminal, usize);
-                    var nonterm_visit_counts = @as(?*Counts, @ptrCast(@alignCast(ctx.nonterm_visit_counts))) orelse
-                        unreachable;
-                    var timer = std.time.Timer.start() catch unreachable;
-                    const prev_id = ctx.rule_id;
-                    defer ctx.rule_id = prev_id;
-                    ctx.rule_id = id;
-                    const p = ctx.rules[id].pattern;
-                    if (debugthis)
-                        debug("nt={s} {s}\n", .{ @tagName(ctx.rules[id].rule_id), @tagName(p) });
-                    defer {
-                        const ns = timer.read();
-                        nonterm_visit_counts.getPtr(@as(G.NonTerminal, @enumFromInt(id))).* += ns;
-                    }
-                    p.run(G, ctx, res);
-                } else {
-                    const rule = ctx.rules[id];
-                    // if the rule is non-nullable and must consume some input,
-                    // do a fast check of the first character to see if its
-                    // in this rule's 'first_set'
-                    if (rule.nullability == .non_nullable) blk: {
-                        const mc = in.get(0);
-                        if (mc) |c| if (rule.first_set.bitset.isSet(c))
-                            break :blk;
+                const rule = ctx.rules[id];
+                // if the rule is non-nullable and must consume some input,
+                // do a fast check of the first character to see if its
+                // in this rule's 'first_set'
+                if (rule.nullability == .non_nullable) blk: {
+                    const mc = in.get(0);
+                    if (mc) |c| if (rule.first_set.bitset.isSet(c))
+                        break :blk;
 
-                        if (debugthis)
-                            debug("{s} first_set {} missing '{?c}'\n", .{ @tagName(rule.rule_id), rule.first_set, mc });
-                        res.* = Result.err(in);
-                        return;
-                    }
-                    const traillen = ctx.nonterm_trail.len;
-                    defer {
-                        if (std.debug.runtime_safety) ctx.nonterm_trail.len = traillen;
-                    }
-                    if (std.debug.runtime_safety) {
-                        const tagname = @tagName(rule.rule_id);
-                        const len = @min(ctx.nonterm_trail.buffer.len - ctx.nonterm_trail.len, tagname.len);
-                        ctx.nonterm_trail.appendSlice(tagname[0..len]) catch unreachable;
-                        ctx.nonterm_trail.append(',') catch {};
-                    }
-
-                    const prev_id = ctx.rule_id;
-                    defer ctx.rule_id = prev_id;
-                    ctx.rule_id = id;
-                    const p = rule.pattern;
                     if (debugthis)
-                        debug("{s} {s}\n", .{ ctx.nonterm_trail.constSlice(), @tagName(p) });
-                    @call(.always_tail, run, .{ p, G, ctx, res });
+                        debug("{s} first_set {} missing '{?c}'\n", .{ @tagName(rule.rule_id), rule.first_set, mc });
+                    res.* = Result.err(in);
+                    return;
                 }
+                const traillen = if (is_debug_mode) ctx.nonterm_trail.len else {};
+                defer {
+                    if (is_debug_mode) ctx.nonterm_trail.len = traillen;
+                }
+                if (is_debug_mode) {
+                    const tagname = @tagName(rule.rule_id);
+                    const len = @min(ctx.nonterm_trail.buffer.len - ctx.nonterm_trail.len, tagname.len);
+                    ctx.nonterm_trail.appendSlice(tagname[0..len]) catch unreachable;
+                    ctx.nonterm_trail.append(',') catch {};
+                }
+
+                const prev_id = ctx.rule_id;
+                defer ctx.rule_id = prev_id;
+                ctx.rule_id = id;
+                const p = rule.pattern;
+                if (debugthis)
+                    debug("{s} {s}\n", .{ ctx.nonterm_trail.constSlice(), @tagName(p) });
+                @call(.always_tail, run, .{ p, Ctx, ctx, res });
             },
             .literal => |lit| {
                 res.* = if (in.startsWith(lit.ptr[0..lit.len]))
@@ -594,7 +609,7 @@ pub const PatternMut = union(enum) {
             .empty => res.* = Result.ok(in, in.range(0)),
             .seq => |pats| {
                 for (pats) |p| {
-                    p.run(G, ctx, res);
+                    p.run(Ctx, ctx, res);
                     if (res.output == .err) return;
                     ctx.input.index = res.input.index;
                 }
@@ -604,25 +619,25 @@ pub const PatternMut = union(enum) {
                 for (pats) |*p| {
                     ctx.input.index = in.index;
 
-                    const traillen = ctx.nonterm_trail.len;
+                    const traillen = if (is_debug_mode) ctx.nonterm_trail.len else {};
                     defer {
-                        if (std.debug.runtime_safety) ctx.nonterm_trail.len = traillen;
+                        if (is_debug_mode) ctx.nonterm_trail.len = traillen;
                     }
-                    p.run(G, ctx, res);
+                    p.run(Ctx, ctx, res);
                     if (res.output == .ok) return;
                 }
                 res.* = Result.err(in);
             },
             .many => |p| {
                 while (true) {
-                    p.run(G, ctx, res);
+                    p.run(Ctx, ctx, res);
                     ctx.input.index = res.input.index;
                     if (res.output == .err) break;
                 }
                 res.* = Result.ok(ctx.input, in.rangeTo(ctx.input.index));
             },
             .not => |p| {
-                p.run(G, ctx, res);
+                p.run(Ctx, ctx, res);
                 ctx.input.index = in.index;
                 res.* = if (res.output == .ok)
                     Result.err(in)
@@ -630,7 +645,7 @@ pub const PatternMut = union(enum) {
                     Result.ok(in, in.rangeTo(res.input.index));
             },
             .amp => |p| {
-                p.run(G, ctx, res);
+                p.run(Ctx, ctx, res);
                 ctx.input.index = in.index;
                 res.* = .{ .input = in, .output = res.output };
             },
@@ -639,7 +654,7 @@ pub const PatternMut = union(enum) {
             else
                 Result.err(in),
             .opt => |p| {
-                p.run(G, ctx, res);
+                p.run(Ctx, ctx, res);
                 if (res.output == .ok) return;
                 ctx.input.index = in.index;
                 res.* = Result.ok(in, in.range(0));
@@ -658,8 +673,16 @@ pub const PatternMut = union(enum) {
                     res.* = gop.value_ptr.*;
                     return;
                 }
-                m.pat.run(G, ctx, res);
+                m.pat.run(Ctx, ctx, res);
                 gop.value_ptr.* = res.*;
+            },
+            .cap => |patid| {
+                patid.pat.run(Ctx, ctx, res);
+                if (res.output == .ok) {
+                    ctx.onCapture(patid.id, res.output.ok) catch |e| {
+                        res.* = Result.errWith(in, e);
+                    };
+                }
             },
         }
     }
@@ -703,10 +726,15 @@ fn formatImpl(
             try formatImpl(Pat, E, ip.*, fmt, opts, writer, depth);
             try writer.writeByte('?');
         },
-        .memo => |m| {
+        .memo => |patid| {
             _ = try writer.write("{{ ");
-            try formatImpl(Pat, E, m.pat.*, fmt, opts, writer, depth);
+            try formatImpl(Pat, E, patid.pat.*, fmt, opts, writer, depth);
             _ = try writer.write(" }}");
+        },
+        .cap => |patid| {
+            _ = try writer.write("{ ");
+            try formatImpl(Pat, E, patid.pat.*, fmt, opts, writer, depth);
+            _ = try writer.write(" }");
         },
         .eos => _ = try writer.write("!."),
         .empty => {},
