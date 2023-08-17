@@ -396,15 +396,13 @@ pub const Expr = union(enum) {
         _: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        try e.formatGenImpl(writer, 0);
+        try e.formatGenImpl(writer);
     }
 
     pub fn formatGenImpl(
         e: Expr,
         writer: anytype,
-        depth: u8,
     ) !void {
-        if (depth > 0) _ = try writer.writeByte('&');
         switch (e) {
             .grammar => |rules| {
                 _ = try writer.write(
@@ -437,7 +435,7 @@ pub const Expr = union(enum) {
                 for (rules) |rule| {
                     try writer.writeByteNTimes(' ', 8);
                     try writer.print("Rule.init(.{s}, ", .{rule[0]});
-                    try rule[1].formatGenImpl(writer, depth);
+                    try rule[1].formatGenImpl(writer);
                     _ = try writer.write("),\n");
                 }
                 _ = try writer.write(
@@ -536,7 +534,7 @@ pub const Expr = union(enum) {
             .seq => |es| {
                 _ = try writer.write("P.seq(&.{");
                 for (es) |ie| {
-                    try ie.formatGenImpl(writer, 0);
+                    try ie.formatGenImpl(writer);
                     _ = try writer.write(", ");
                 }
                 _ = try writer.write("})");
@@ -544,44 +542,44 @@ pub const Expr = union(enum) {
             .alt => |es| {
                 _ = try writer.write("P.alt(&.{");
                 for (es) |ie| {
-                    try ie.formatGenImpl(writer, 0);
+                    try ie.formatGenImpl(writer);
                     _ = try writer.write(", ");
                 }
                 _ = try writer.write("})");
             },
             .not => |ie| {
-                _ = try writer.write("P.not(");
-                try ie.formatGenImpl(writer, depth + 1);
+                _ = try writer.write("P.not(&");
+                try ie.formatGenImpl(writer);
                 _ = try writer.write(")");
             },
             .amp => |ie| {
-                _ = try writer.write("P.amp(");
-                try ie.formatGenImpl(writer, depth + 1);
+                _ = try writer.write("P.amp(&");
+                try ie.formatGenImpl(writer);
                 _ = try writer.write(")");
             },
             .opt => |ie| {
-                _ = try writer.write("P.opt(");
-                try ie.formatGenImpl(writer, depth + 1);
+                _ = try writer.write("P.opt(&");
+                try ie.formatGenImpl(writer);
                 _ = try writer.write(")");
             },
             .star => |ie| {
-                _ = try writer.write("P.many(");
-                try ie.formatGenImpl(writer, depth + 1);
+                _ = try writer.write("P.many(&");
+                try ie.formatGenImpl(writer);
                 _ = try writer.write(")");
             },
             .plus => |ie| {
-                _ = try writer.write("P.plus(");
-                try ie.formatGenImpl(writer, depth + 1);
-                _ = try writer.write(")");
+                _ = try writer.write("P.seq(&.{");
+                try ie.formatGenImpl(writer);
+                _ = try writer.write(", P.many(&");
+                try ie.formatGenImpl(writer);
+                _ = try writer.write(")})");
             },
             .group => |ie| {
-                _ = try writer.write("P.group(");
-                try ie.formatGenImpl(writer, depth + 1);
-                _ = try writer.write(")");
+                try ie.formatGenImpl(writer);
             },
             .memo => |m| {
-                _ = try writer.write("P.memo(");
-                try m.expr.formatGenImpl(writer, depth + 1);
+                _ = try writer.write("P.memo(&");
+                try m.expr.formatGenImpl(writer);
                 try writer.print(", {})", .{m.id});
             },
         }
