@@ -37,6 +37,7 @@ pub fn ParseContext(comptime G: type) type {
         memo: MemoTable = .{},
         // TODO make void in non-debug builds, eventually remove.
         nonterm_visit_counts: ?*anyopaque = null,
+        nonterm_trail: std.BoundedArray(u8, 512) = .{},
 
         /// only initializes 'rules' field. 'in' and 'id' fields will be
         /// initialized in Pattern.parse
@@ -64,12 +65,9 @@ pub const Pattern = union(enum) {
     alt: []const Pattern,
     seq: []const Pattern,
     many: *const Pattern,
-    plus: *const Pattern,
     opt: *const Pattern,
     not: *const Pattern,
     amp: *const Pattern,
-    // TODO remove unnecessary
-    group: *const Pattern,
     memo: Memo,
     nonterm: u32,
     dot,
@@ -109,9 +107,6 @@ pub const Pattern = union(enum) {
     pub fn many(payload: *const Pattern) Pattern {
         return .{ .many = payload };
     }
-    pub fn plus(payload: *const Pattern) Pattern {
-        return .{ .plus = payload };
-    }
     pub fn opt(payload: *const Pattern) Pattern {
         return .{ .opt = payload };
     }
@@ -123,9 +118,6 @@ pub const Pattern = union(enum) {
     }
     pub fn amp(payload: *const Pattern) Pattern {
         return .{ .amp = payload };
-    }
-    pub fn group(payload: *const Pattern) Pattern {
-        return .{ .group = payload };
     }
     pub fn nonterm(payload: u32) Pattern {
         return .{ .nonterm = payload };
@@ -155,13 +147,13 @@ pub const Pattern = union(enum) {
         if (show_nonterm_visit_counts) ctx.nonterm_visit_counts = &nonterm_visit_counts;
 
         var result: Result = undefined;
-        const rule = ctx.rules[ctx.rule_id].pattern;
-        rule.run(G, ctx, &result);
+        const pat = ctx.rules[ctx.rule_id].pattern;
+        pat.run(G, ctx, &result);
 
         if (show_nonterm_visit_counts) {
             std.sort.insertion(usize, &nonterm_visit_counts.values, {}, std.sort.desc(usize));
             for (std.meta.tags(G.NonTerminal)) |tag| {
-                std.debug.print("{s}={}\n", .{ @tagName(tag), nonterm_visit_counts.get(tag) });
+                debug("{s}={}\n", .{ @tagName(tag), nonterm_visit_counts.get(tag) });
             }
         }
 
@@ -210,7 +202,6 @@ pub const Pattern = union(enum) {
                 if (!eql(subp, other.seq[i])) break false;
             } else true,
             inline .many,
-            .plus,
             .opt,
             .not,
             .amp,
@@ -318,12 +309,11 @@ pub const Pattern = union(enum) {
                     r[i] = try optimizeImpl(G, pats[i], depth + 1, arena, mode);
                 return .{ .seq = r };
             },
-            inline .not, .amp, .opt, .many, .plus => |p, tag| {
+            inline .not, .amp, .opt, .many => |p, tag| {
                 const r = try arena.create(PatternMut);
                 r.* = try optimizeImpl(G, p.*, depth, arena, mode);
                 return @unionInit(PatternMut, @tagName(tag), r);
             },
-            .group => |p| return try optimizeImpl(G, p.*, depth, arena, mode),
             inline .literal, .class => |p, tag| {
                 return @unionInit(PatternMut, @tagName(tag), p);
             },
@@ -384,6 +374,8 @@ pub fn Rule(comptime NonTerminal: type, comptime Pat: type) type {
     };
 }
 
+const debug = std.debug.print;
+
 /// a data format similar to Expr for running parsers
 pub const PatternMut = union(enum) {
     literal: Literal,
@@ -391,7 +383,6 @@ pub const PatternMut = union(enum) {
     alt: []PatternMut,
     seq: []PatternMut,
     many: *PatternMut,
-    plus: *PatternMut,
     opt: *PatternMut,
     not: *PatternMut,
     amp: *PatternMut,
@@ -428,8 +419,8 @@ pub const PatternMut = union(enum) {
         const in = ctx.input;
         const debugthis = false;
         if (debugthis) {
-            std.debug.print("{}", .{in});
-            if (pat != .nonterm) std.debug.print("{}\n", .{pat});
+            debug("{} ", .{in});
+            if (pat != .nonterm) debug("{}\n", .{pat});
         }
         switch (pat) {
             .nonterm => |id| {
@@ -443,19 +434,30 @@ pub const PatternMut = union(enum) {
                     ctx.rule_id = id;
                     const p = ctx.rules[id].pattern;
                     if (debugthis)
-                        std.debug.print("{s} {s}\n", .{ @tagName(ctx.rules[id].rule_id), @tagName(p) });
+                        debug("nt={s} {s}\n", .{ @tagName(ctx.rules[id].rule_id), @tagName(p) });
                     defer {
                         const ns = timer.read();
                         nonterm_visit_counts.getPtr(@as(G.NonTerminal, @enumFromInt(id))).* += ns;
                     }
                     p.run(G, ctx, res);
                 } else {
+                    const rule = ctx.rules[id];
+                    defer {
+                        if (std.debug.runtime_safety) ctx.nonterm_trail.len = traillen;
+                    }
+                    if (std.debug.runtime_safety) {
+                        const tagname = @tagName(rule.rule_id);
+                        const len = @min(ctx.nonterm_trail.buffer.len - ctx.nonterm_trail.len, tagname.len);
+                        ctx.nonterm_trail.appendSlice(tagname[0..len]) catch unreachable;
+                        ctx.nonterm_trail.append(',') catch {};
+                    }
+
                     const prev_id = ctx.rule_id;
                     defer ctx.rule_id = prev_id;
                     ctx.rule_id = id;
-                    const p = ctx.rules[id].pattern;
+                    const p = rule.pattern;
                     if (debugthis)
-                        std.debug.print("{s} {s}\n", .{ @tagName(ctx.rules[id].rule_id), @tagName(p) });
+                        debug("{s} {s}\n", .{ ctx.nonterm_trail.constSlice(), @tagName(p) });
                     @call(.always_tail, run, .{ p, G, ctx, res });
                 }
             },
@@ -491,23 +493,17 @@ pub const PatternMut = union(enum) {
             .alt => |pats| {
                 for (pats) |*p| {
                     ctx.input.index = in.index;
+
+                    const traillen = ctx.nonterm_trail.len;
+                    defer {
+                        if (std.debug.runtime_safety) ctx.nonterm_trail.len = traillen;
+                    }
                     p.run(G, ctx, res);
                     if (res.output == .ok) return;
                 }
                 res.* = Result.err(in);
             },
             .many => |p| {
-                while (true) {
-                    p.run(G, ctx, res);
-                    ctx.input.index = res.input.index;
-                    if (res.output == .err) break;
-                }
-                res.* = Result.ok(ctx.input, in.rangeTo(ctx.input.index));
-            },
-            .plus => |p| {
-                p.run(G, ctx, res);
-                ctx.input.index = res.input.index;
-                if (res.output == .err) return;
                 while (true) {
                     p.run(G, ctx, res);
                     ctx.input.index = res.input.index;
@@ -547,7 +543,7 @@ pub const PatternMut = union(enum) {
                     return;
                 };
                 // if (gop.found_existing)
-                //     std.debug.print("found existing memo entry\n", .{});
+                //     debug("found existing memo entry\n", .{});
                 if (gop.found_existing) {
                     res.* = gop.value_ptr.*;
                     return;
@@ -592,10 +588,6 @@ fn formatImpl(
         .many => |ip| {
             try formatImpl(Pat, E, ip.*, fmt, opts, writer, depth);
             try writer.writeByte('*');
-        },
-        .plus => |ip| {
-            try formatImpl(Pat, E, ip.*, fmt, opts, writer, depth);
-            try writer.writeByte('+');
         },
         .opt => |ip| {
             try formatImpl(Pat, E, ip.*, fmt, opts, writer, depth);
