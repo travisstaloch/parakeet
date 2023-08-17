@@ -179,3 +179,9 @@ test "peg grammar" {
         \\    / ascii_char_not_nl_slash_squote
     );
 }
+
+test "peg capture" {
+    try checkSame(pegps.grammar,
+        \\a <- { 'a' }
+    );
+}

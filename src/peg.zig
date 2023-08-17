@@ -47,7 +47,8 @@ pub const Expr = union(enum) {
     star: *const Expr,
     plus: *const Expr,
     group: *const Expr,
-    memo: Memo,
+    memo: ExprId,
+    cap: ExprId,
     alt: []const Expr,
     seq: []const Expr,
     grammar: []const Def,
@@ -90,7 +91,7 @@ pub const Expr = union(enum) {
             return .{ .bitset = if (negated) bitset.complement() else bitset };
         }
     };
-    pub const Memo = struct { expr: *const Expr, id: u32 };
+    pub const ExprId = struct { expr: *const Expr, id: u32 };
 
     pub fn deinit(e: Expr, allocator: mem.Allocator) void {
         switch (e) {
@@ -108,7 +109,7 @@ pub const Expr = union(enum) {
             },
             .litD, .litS => |s| allocator.free(s),
             .ident, .dot, .empty, .class => {},
-            .memo => |m| {
+            .memo, .cap => |m| {
                 m.expr.deinit(allocator);
                 allocator.destroy(m.expr);
             },
@@ -159,11 +160,19 @@ pub const Expr = union(enum) {
     }
     var memoid: u32 = 0;
     pub fn memo(e: Expr, mallocator: ?mem.Allocator) !Expr {
-        defer memoid += 1;
         const allocator = mallocator orelse return error.AllocatorRequired;
         const o = try allocator.create(Expr);
         o.* = e;
+        defer memoid += 1;
         return .{ .memo = .{ .expr = o, .id = memoid } };
+    }
+    var capid: u32 = 0;
+    pub fn capture(e: Expr, mallocator: ?mem.Allocator) !Expr {
+        const allocator = mallocator orelse return error.AllocatorRequired;
+        const o = try allocator.create(Expr);
+        o.* = e;
+        defer capid += 1;
+        return .{ .cap = .{ .expr = o, .id = capid } };
     }
     pub fn group(e: Expr, mallocator: ?mem.Allocator) !Expr {
         // if its a single node, just return it. only allow seq and alt nodes in group
@@ -366,10 +375,15 @@ pub const Expr = union(enum) {
                 try ie.formatImpl(writer, depth + 1);
                 _ = try writer.write(" )");
             },
-            .memo => |m| {
+            .memo => |eid| {
                 _ = try writer.write("{{ ");
-                try m.expr.formatImpl(writer, depth + 1);
+                try eid.expr.formatImpl(writer, depth + 1);
                 _ = try writer.write(" }}");
+            },
+            .cap => |eid| {
+                _ = try writer.write("{ ");
+                try eid.expr.formatImpl(writer, depth + 1);
+                _ = try writer.write(" }");
             },
             .grammar => |ds| {
                 for (ds, 0..) |d, i| {
@@ -577,10 +591,15 @@ pub const Expr = union(enum) {
             .group => |ie| {
                 try ie.formatGenImpl(writer);
             },
-            .memo => |m| {
+            .memo => |eid| {
                 _ = try writer.write("P.memo(&");
-                try m.expr.formatGenImpl(writer);
-                try writer.print(", {})", .{m.id});
+                try eid.expr.formatGenImpl(writer);
+                try writer.print(", {})", .{eid.id});
+            },
+            .cap => |eid| {
+                _ = try writer.write("P.capture(&");
+                try eid.expr.formatGenImpl(writer);
+                try writer.print(", {})", .{eid.id});
             },
         }
     }
@@ -707,23 +726,36 @@ pub const ident_str = ps.seq(.{
     }
 
     // zig fmt: off
-pub const class = ps.char('[')
-    .discardL(ps.seqMap(.{
-        ps.option(ps.char('^')).map(pk.isNonEmptyString),
-        ps.foldWhile(Expr.Class.Set.initEmpty(), range, accCharsets),
-    }, maybeNegate)
-    .map(Expr.class))
-    .discardR(ps.char(']'))
-    .discardR(spacing);
-// zig fmt: on
+    pub const class = ps.char('[')
+        .discardL(ps.seqMap(.{
+            ps.option(ps.char('^')).map(pk.isNonEmptyString),
+            ps.foldWhile(Expr.Class.Set.initEmpty(), range, accCharsets),
+        }, maybeNegate)
+        .map(Expr.class))
+        .discardR(ps.char(']'))
+        .discardR(spacing);
+    // zig fmt: on
 
     pub const memo = ps.seqMapAlloc(.{
         ps.discardSeq(.{ ps.str("{{"), spacing }),
         ps.ref(exprRef),
         ps.discardSeq(.{ ps.str("}}"), spacing }),
     }, Expr.memo);
+    pub const capture = ps.seqMapAlloc(.{
+        ps.discardSeq(.{ ps.str("{"), spacing }),
+        ps.ref(exprRef),
+        ps.discardSeq(.{ ps.str("}"), spacing }),
+    }, Expr.capture);
 
-    pub const primary = ps.choice(.{ ident, group, literal, class, memo, dot });
+    pub const primary = ps.choice(.{
+        ident,
+        group,
+        literal,
+        class,
+        memo,
+        capture,
+        dot,
+    });
 
     fn exprTag(comptime t: ?Expr.Tag) fn (u8) ?Expr.Tag {
         return struct {
