@@ -347,24 +347,120 @@ pub const Pattern = union(enum) {
         const rules = try arena.alloc(Rule(G.NonTerminal, PatternMut), G.rules.len);
         for (0..G.rules.len) |i| {
             rules[i].rule_id = G.rules[i].rule_id;
-            // std.debug.print("rule={s}\n", .{@tagName(rule.rule_id)});
             rules[i].pattern = try optimizeImpl(G, G.rules[i].pattern, 0, arena, mode);
+            rules[i].first_set = .{ .bitset = Expr.Class.Set.initEmpty() };
+            rules[i].nullability = nullability(G, G.rules[i].pattern, G.rules[i].rule_id);
+            // debug("optimize() rule={s} nullability={}\n", .{ @tagName(G.rules[i].rule_id), rules[i].nullability });
+            calcFirstSet(G, G.rules[i].pattern, &rules[i].first_set, G.rules[i].rule_id);
         }
         return rules;
+    }
+
+    pub fn nullability(comptime G: type, pat: Pattern, start_rule_id: G.NonTerminal) Nullability {
+        return switch (pat) {
+            .literal, .class, .dot => .non_nullable,
+            .alt => |ps| for (ps) |p| {
+                if (nullability(G, p, start_rule_id) == .nullable) break .nullable;
+            } else .non_nullable,
+            .seq => |ps| for (ps) |p| {
+                if (nullability(G, p, start_rule_id) == .non_nullable) break .non_nullable;
+            } else .nullable,
+            .many, .opt, .not, .amp => .nullable,
+            .eos, .empty => .nullable,
+            .memo => |m| nullability(G, m.pat.*, start_rule_id),
+            .nonterm => |id| if (@as(G.NonTerminal, @enumFromInt(id)) == start_rule_id)
+                .unknown
+            else
+                nullability(G, G.rules[id].pattern, start_rule_id),
+        };
+    }
+
+    pub fn calcFirstSet(
+        comptime G: type,
+        pat: Pattern,
+        first_set: *Expr.Class,
+        start_rule_id: G.NonTerminal,
+    ) void {
+        // debug("calcFirstSet {s}={} first_set={}\n", .{ @tagName(pat), pat, first_set.* });
+        switch (pat) {
+            .literal => |lit| first_set.bitset.set(lit.ptr[0]),
+            .class => |c| {
+                // my intuition was that negated bitsets (over 1/2 bits set),
+                // need to be inverted.  but this leads to incorrect parsing
+                // results with a few zig files in the std lib.
+                first_set.bitset.setUnion(c.bitset);
+            },
+            .alt => |ps| {
+                for (ps) |p| {
+                    var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
+                    calcFirstSet(G, p, &c, start_rule_id);
+                    first_set.bitset.setUnion(c.bitset);
+                }
+            },
+            .seq => |ps| {
+                for (ps) |p| {
+                    var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
+                    calcFirstSet(G, p, &c, start_rule_id);
+                    // debug("seq c={}\n", .{Expr{ .class = c }});
+                    first_set.bitset.setUnion(c.bitset);
+                    if (nullability(G, p, start_rule_id) == .non_nullable) break;
+                }
+            },
+            .many, .opt => |p| {
+                var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
+                calcFirstSet(G, p.*, &c, start_rule_id);
+                first_set.bitset.setUnion(c.bitset);
+            },
+            .amp => |p| {
+                var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
+                calcFirstSet(G, p.*, &c, start_rule_id);
+                first_set.bitset.setIntersection(c.bitset);
+            },
+            .not => |p| {
+                if (p.* == .class) {
+                    // var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
+                    calcFirstSet(G, p.*, first_set, start_rule_id);
+                    first_set.bitset.toggleAll();
+                } else {
+                    var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
+                    calcFirstSet(G, p.*, &c, start_rule_id);
+                    first_set.bitset = c.bitset;
+                }
+            },
+            .memo => |m| calcFirstSet(G, m.pat.*, first_set, start_rule_id),
+            .nonterm => |id| {
+                if (@as(G.NonTerminal, @enumFromInt(id)) != start_rule_id) {
+                    var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
+                    calcFirstSet(G, G.rules[id].pattern, &c, start_rule_id);
+                    first_set.bitset.setUnion(c.bitset);
+                }
+            },
+            .dot => first_set.bitset = Expr.Class.Set.initFull(),
+            .eos, .empty => {},
+        }
+        // debug("calcFirstSet end {s}={} first_set={}\n", .{ @tagName(pat), pat, first_set.* });
     }
 };
 
 const show_nonterm_visit_counts = false;
 
+pub const Nullability = enum { unknown, non_nullable, nullable };
+
 pub fn Rule(comptime NonTerminal: type, comptime Pat: type) type {
     return struct {
         rule_id: NonTerminal,
         pattern: Pat,
+        /// set of possible first characters
+        first_set: Expr.Class = .{ .bitset = Expr.Class.Set.initEmpty() },
+        /// 'nullable' means that the rule may succeed without consuming any input
+        nullability: Nullability,
 
         pub fn init(rule_id: NonTerminal, pattern: Pat) @This() {
             return .{
                 .rule_id = rule_id,
                 .pattern = pattern,
+                .first_set = .{ .bitset = Expr.Class.Set.initEmpty() },
+                .nullability = .unknown,
             };
         }
 
@@ -442,6 +538,20 @@ pub const PatternMut = union(enum) {
                     p.run(G, ctx, res);
                 } else {
                     const rule = ctx.rules[id];
+                    // if the rule is non-nullable and must consume some input,
+                    // do a fast check of the first character to see if its
+                    // in this rule's 'first_set'
+                    if (rule.nullability == .non_nullable) blk: {
+                        const mc = in.get(0);
+                        if (mc) |c| if (rule.first_set.bitset.isSet(c))
+                            break :blk;
+
+                        if (debugthis)
+                            debug("{s} first_set {} missing '{?c}'\n", .{ @tagName(rule.rule_id), rule.first_set, mc });
+                        res.* = Result.err(in);
+                        return;
+                    }
+                    const traillen = ctx.nonterm_trail.len;
                     defer {
                         if (std.debug.runtime_safety) ctx.nonterm_trail.len = traillen;
                     }

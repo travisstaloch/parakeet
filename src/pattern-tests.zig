@@ -155,3 +155,43 @@ test "pattern optimizations" {
         try expectFormat("0 ( 1 / 2 )", "{}", .{p});
     }
 }
+
+test "first sets and nullability" {
+    // example is from https://holub.com/goodies/compiler/compilerDesignInC.pdf
+    // section 4.7.1
+    const G = struct {
+        pub const NonTerminal = enum { stmt, expr, expr2, term, term2, factor };
+        pub const Rule = pk.pattern.Rule(NonTerminal, Pattern);
+        // zig fmt: off
+        pub const rules = [_]Rule{
+            // stmt <- expr ';'
+            Rule.init(.stmt,  Pattern.seq(&.{  Rule.nonterm(.expr), Pattern.literal(";") })),
+            // expr <- term expr2 /
+            Rule.init(.expr, Pattern.alt(&.{ Pattern.seq(&.{  Rule.nonterm(.term), Rule.nonterm(.expr2) }), .empty })),
+            // expr2 <- '+' term expr2 /
+            Rule.init(.expr2, Pattern.alt(&.{ Pattern.seq(&.{ Pattern.literal("+"),  Rule.nonterm(.term), Rule.nonterm(.expr2) }), .empty })),
+            // term <- factor term2
+            Rule.init(.term, Pattern.seq(&.{  Rule.nonterm(.factor), Rule.nonterm(.term2) })),
+            // term2 <- '*' factor term2 /
+            Rule.init(.term2, Pattern.alt(&.{ Pattern.seq(&.{ Pattern.literal("*"),  Rule.nonterm(.factor), Rule.nonterm(.term2) }), .empty })),
+            // factor <- '(' expr ')' / [0-9]
+            Rule.init(.factor, Pattern.alt(&.{ Pattern.seq(&.{  Pattern.literal("("), Rule.nonterm(.expr), Pattern.literal(")") }), Pattern.class(&Expr.Class.init( &.{.{.range = .{'0', '9' }}})) })),
+        };
+        // zig fmt: on
+    };
+    var arena = std.heap.ArenaAllocator.init(talloc);
+    defer arena.deinit();
+    const rules = try Pattern.optimize(G, arena.allocator(), .optimized);
+    try expectFormat("[(0-9;]", "{}", .{rules[0].first_set}); // stmt
+    try testing.expect(rules[0].nullability == .non_nullable);
+    try expectFormat("[(0-9]", "{}", .{rules[1].first_set}); // expr
+    try testing.expect(rules[1].nullability == .nullable);
+    try expectFormat("[+]", "{}", .{rules[2].first_set}); // expr2
+    try testing.expect(rules[2].nullability == .nullable);
+    try expectFormat("[(0-9]", "{}", .{rules[3].first_set}); // term
+    try testing.expect(rules[3].nullability == .non_nullable);
+    try expectFormat("[*]", "{}", .{rules[4].first_set}); // term2
+    try testing.expect(rules[4].nullability == .nullable);
+    try expectFormat("[(0-9]", "{}", .{rules[5].first_set}); // factor
+    try testing.expect(rules[5].nullability == .non_nullable);
+}
