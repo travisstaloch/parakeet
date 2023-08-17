@@ -51,12 +51,13 @@ pub fn main() !void {
         }
         var errcount: usize = 0;
         var bytes_processed: usize = 0;
-        var ctx = try pk.pattern.ParseContext(G).init(alloc, .optimized);
+        const Ctx = pk.pattern.ParseContext(G, void);
+        var ctx = try Ctx.init(.{ .allocator = alloc });
         var timer = try std.time.Timer.start();
         for (files.items) |file| {
             // std.debug.print("path={s}\n", .{file[0]});
             const r = pk.pattern.Pattern.parse(
-                G,
+                Ctx,
                 &ctx,
                 @intFromEnum(start_id),
                 file[1],

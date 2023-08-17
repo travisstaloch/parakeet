@@ -24,8 +24,9 @@ test "pattern with negated character classes" {
     // zig fmt: on
     var arena = std.heap.ArenaAllocator.init(talloc);
     defer arena.deinit();
-    var ctx = try pk.pattern.ParseContext(G).init(arena.allocator(), .optimized);
-    const r = Pattern.parse(G, &ctx, @intFromEnum(G.NonTerminal.STRINGLITERALSINGLE),
+    const Ctx = pk.pattern.ParseContext(G, void);
+    var ctx = try Ctx.init(.{ .allocator = arena.allocator() });
+    const r = Pattern.parse(Ctx, &ctx, @intFromEnum(G.NonTerminal.STRINGLITERALSINGLE),
         \\"str"
     );
     try testing.expect(r.output == .ok);
@@ -71,17 +72,18 @@ test "negated char class matches not char class" {
 
         var arena = std.heap.ArenaAllocator.init(talloc);
         defer arena.deinit();
-        var ctx = try pk.pattern.ParseContext(G).init(arena.allocator(), .optimized);
+        const Ctx = pk.pattern.ParseContext(G, void);
+        var ctx = try Ctx.init(.{ .allocator = arena.allocator() });
         inline for (expecteds) |expected| {
             var r: pk.pattern.Result = undefined;
             ctx.input = pk.input(expected[0]);
             ctx.rule_id = 0;
-            ctx.rules[0].pattern.run(G, &ctx, &r);
+            ctx.rules[0].pattern.run(Ctx, &ctx, &r);
             // std.debug.print("negated={} r={} expected=({s},{})\n", .{ negated, r, expected[0], expected[1] });
             try testing.expect((r.output == expected[1]) == negated);
             ctx.input = pk.input(expected[0]);
             ctx.rule_id = 0;
-            ctx.rules[1].pattern.run(G, &ctx, &r);
+            ctx.rules[1].pattern.run(Ctx, &ctx, &r);
             try testing.expect((r.output == expected[1]) == negated);
         }
     }
@@ -194,4 +196,37 @@ test "first sets and nullability" {
     try testing.expect(rules[4].nullability == .nullable);
     try expectFormat("[(0-9]", "{}", .{rules[5].first_set}); // factor
     try testing.expect(rules[5].nullability == .non_nullable);
+}
+
+test "basic captures" {
+    const G = struct {
+        pub const NonTerminal = enum { S, foo, bar };
+        pub const Rule = pk.pattern.Rule(NonTerminal, Pattern);
+        pub const rules = [_]Rule{
+            Rule.init(.S, Pattern.seq(&.{ Rule.nonterm(.foo), Rule.nonterm(.bar) })),
+            Rule.init(.foo, Pattern.capture(&Pattern.literal("foo"), 0)),
+            Rule.init(.bar, Pattern.capture(&Pattern.literal("bar"), 1)),
+        };
+    };
+    var arena = std.heap.ArenaAllocator.init(talloc);
+    defer arena.deinit();
+    const CaptureHandler = struct {
+        captures: std.ArrayListUnmanaged([]const u8) = .{},
+        allocator: std.mem.Allocator,
+        pub fn onCapture(self: *@This(), capid: u32, cap: []const u8) !void {
+            _ = capid;
+            // std.debug.print("text={s}\n", .{cap});
+            try self.captures.append(self.allocator, cap);
+        }
+    };
+    var handler = CaptureHandler{ .allocator = arena.allocator() };
+    const Ctx = pk.pattern.ParseContext(G, CaptureHandler);
+    var ctx = try Ctx.init(.{
+        .allocator = arena.allocator(),
+        .capture_handler = &handler,
+    });
+    const r = Pattern.parse(Ctx, &ctx, @intFromEnum(G.NonTerminal.S), "foobar");
+    try testing.expect(r.output == .ok);
+    try testing.expectEqualStrings("foo", handler.captures.items[0]);
+    try testing.expectEqualStrings("bar", handler.captures.items[1]);
 }
