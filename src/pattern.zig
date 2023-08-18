@@ -161,6 +161,10 @@ pub const Pattern = union(enum) {
     pub fn nonterm(payload: u32) Pattern {
         return .{ .nonterm = payload };
     }
+    pub fn nontermNamed(name: []const u8, payload: u32) Pattern {
+        _ = name;
+        return .{ .nonterm = payload };
+    }
     pub fn dot() Pattern {
         return .dot;
     }
@@ -501,6 +505,8 @@ pub fn Rule(comptime NonTerminal: type, comptime Pat: type) type {
         }
     };
 }
+
+pub const Rule2 = struct { []const u8, pk.pattern.Pattern };
 
 const debug = std.debug.print;
 

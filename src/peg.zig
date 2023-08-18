@@ -400,69 +400,120 @@ pub const Expr = union(enum) {
         }
     }
 
-    pub fn fmtGen(e: Expr) std.fmt.Formatter(formatGen) {
-        return .{ .data = e };
+    const ExprAllr = struct { Expr, mem.Allocator };
+    pub fn fmtGen(e: Expr, allocator: mem.Allocator) std.fmt.Formatter(formatGen) {
+        return .{ .data = .{ e, allocator } };
     }
 
+    pub const FmtMode = enum { enum_literals, string_literals };
+    pub const NonTerminalIdMap = std.StringHashMap(u32);
     pub fn formatGen(
-        e: Expr,
-        comptime _: []const u8,
+        ea: ExprAllr,
+        comptime fmt: []const u8,
         _: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        try e.formatGenImpl(writer);
+        const mode: FmtMode = if (fmt.len == 0)
+            .enum_literals
+        else if (comptime mem.eql(u8, fmt, "s"))
+            .string_literals
+        else
+            @compileError("formatGen() unsupported fmt: '" ++ fmt ++ "'");
+        var nonterms = NonTerminalIdMap.init(ea[1]);
+        try ea[0].formatGenImpl(mode, &nonterms, writer);
     }
 
     pub fn formatGenImpl(
         e: Expr,
+        mode: FmtMode,
+        nonterms: *NonTerminalIdMap,
         writer: anytype,
     ) !void {
         switch (e) {
             .grammar => |rules| {
-                _ = try writer.write(
-                    \\pub fn Grammar(
-                    \\    comptime pk: type,
-                    \\    comptime options: struct { eval_branch_quota: usize = 1000 },
-                    \\) type {
-                    \\    return struct {
-                    \\    pub const Rule = pk.pattern.Rule(NonTerminal, pk.pattern.Pattern);
-                    \\    pub const NonTerminal = enum {
-                    \\
-                );
-                for (rules) |rule| {
-                    try writer.writeByteNTimes(' ', 8);
-                    _ = try writer.write(rule[0]);
-                    _ = try writer.write(",\n");
+                if (mode == .enum_literals) {
+                    _ = try writer.write(
+                        \\pub fn Grammar(
+                        \\    comptime pk: type,
+                        \\    comptime options: struct { eval_branch_quota: usize = 1000 },
+                        \\) type {
+                        \\    return struct {
+                        \\    pub const Rule = pk.pattern.Rule(NonTerminal, pk.pattern.Pattern);
+                        \\    pub const NonTerminal = enum {
+                        \\
+                    );
+                    for (rules) |rule| {
+                        try writer.writeByteNTimes(' ', 8);
+                        _ = try writer.write(rule[0]);
+                        _ = try writer.write(",\n");
+                    }
+
+                    _ = try writer.write(
+                        \\    };
+                        \\    const rules_len = @typeInfo(NonTerminal).Enum.fields.len;
+                        \\
+                        \\    const P = pk.pattern.Pattern;
+                        \\    const Class = pk.peg.Expr.Class;
+                        \\    const nonterm = Rule.nonterm;
+                        \\    fn _rules() [rules_len]Rule {
+                        \\        @setEvalBranchQuota(options.eval_branch_quota);
+                        \\        return [_]Rule{
+                        \\
+                    );
+                    for (rules) |rule| {
+                        try writer.writeByteNTimes(' ', 8);
+                        try writer.print("Rule.init(.{s}, ", .{rule[0]});
+                        try rule[1].formatGenImpl(mode, nonterms, writer);
+                        _ = try writer.write("),\n");
+                    }
+
+                    _ = try writer.write(
+                        \\        };
+                        \\    }
+                        \\
+                        \\    pub const rules = _rules();
+                        \\    };
+                        \\}
+                    );
+                } else {
+                    _ = try writer.write(
+                        \\pub fn grammar(
+                        \\    comptime pk: type,
+                        \\    comptime options: struct { eval_branch_quota: usize = 1000 },
+                        \\) []const pk.pattern.Rule2 {
+                        \\        @setEvalBranchQuota(options.eval_branch_quota);
+                        \\
+                    );
+                    for (rules, 0..) |rule, i| {
+                        nonterms.put(rule[0], @intCast(i)) catch |err| {
+                            std.debug.panic("unrecoverable grammar error: '{s}'\n", .{@errorName(err)});
+                        };
+                    }
+                    _ = try writer.write(
+                        \\    const P = pk.pattern.Pattern;
+                        \\    const Class = pk.peg.Expr.Class;
+                        \\    const nonterm = P.nontermNamed;
+                        \\    return comptime &.{
+                        \\
+                    );
+                    for (rules) |rule| {
+                        try writer.writeByteNTimes(' ', 8);
+                        try writer.print(".{{\"{s}\", ", .{rule[0]});
+                        try rule[1].formatGenImpl(mode, nonterms, writer);
+                        _ = try writer.write("},\n");
+                    }
+                    _ = try writer.write("    };\n}");
                 }
-                _ = try writer.write(
-                    \\    };
-                    \\    const rules_len = @typeInfo(NonTerminal).Enum.fields.len;
-                    \\
-                    \\    const P = pk.pattern.Pattern;
-                    \\    const Class = pk.peg.Expr.Class;
-                    \\    const nonterm = Rule.nonterm;
-                    \\    fn _rules() [rules_len]Rule {
-                    \\        @setEvalBranchQuota(options.eval_branch_quota);
-                    \\        return [_]Rule{
-                    \\
-                );
-                for (rules) |rule| {
-                    try writer.writeByteNTimes(' ', 8);
-                    try writer.print("Rule.init(.{s}, ", .{rule[0]});
-                    try rule[1].formatGenImpl(writer);
-                    _ = try writer.write("),\n");
-                }
-                _ = try writer.write(
-                    \\        };
-                    \\    }
-                    \\
-                    \\    pub const rules = _rules();
-                    \\    };
-                    \\}
-                );
             },
             .ident => |s| {
-                try writer.print("nonterm(.{s})", .{s});
+                if (mode == .enum_literals)
+                    try writer.print("nonterm(.{s})", .{s})
+                else {
+                    const id = nonterms.get(s) orelse {
+                        std.debug.panic("unrecoverable grammar error: invalid nonterminal '{s}'\n", .{s});
+                    };
+                    try writer.print("nonterm(\"{s}\", {})", .{ s, id });
+                }
             },
             .litS, .litD => |s| {
                 _ = try writer.write("P.literal(\"");
@@ -548,7 +599,7 @@ pub const Expr = union(enum) {
             .seq => |es| {
                 _ = try writer.write("P.seq(&.{");
                 for (es) |ie| {
-                    try ie.formatGenImpl(writer);
+                    try ie.formatGenImpl(mode, nonterms, writer);
                     _ = try writer.write(", ");
                 }
                 _ = try writer.write("})");
@@ -556,49 +607,49 @@ pub const Expr = union(enum) {
             .alt => |es| {
                 _ = try writer.write("P.alt(&.{");
                 for (es) |ie| {
-                    try ie.formatGenImpl(writer);
+                    try ie.formatGenImpl(mode, nonterms, writer);
                     _ = try writer.write(", ");
                 }
                 _ = try writer.write("})");
             },
             .not => |ie| {
                 _ = try writer.write("P.not(&");
-                try ie.formatGenImpl(writer);
+                try ie.formatGenImpl(mode, nonterms, writer);
                 _ = try writer.write(")");
             },
             .amp => |ie| {
                 _ = try writer.write("P.amp(&");
-                try ie.formatGenImpl(writer);
+                try ie.formatGenImpl(mode, nonterms, writer);
                 _ = try writer.write(")");
             },
             .opt => |ie| {
                 _ = try writer.write("P.opt(&");
-                try ie.formatGenImpl(writer);
+                try ie.formatGenImpl(mode, nonterms, writer);
                 _ = try writer.write(")");
             },
             .star => |ie| {
                 _ = try writer.write("P.many(&");
-                try ie.formatGenImpl(writer);
+                try ie.formatGenImpl(mode, nonterms, writer);
                 _ = try writer.write(")");
             },
             .plus => |ie| {
                 _ = try writer.write("P.seq(&.{");
-                try ie.formatGenImpl(writer);
+                try ie.formatGenImpl(mode, nonterms, writer);
                 _ = try writer.write(", P.many(&");
-                try ie.formatGenImpl(writer);
+                try ie.formatGenImpl(mode, nonterms, writer);
                 _ = try writer.write(")})");
             },
             .group => |ie| {
-                try ie.formatGenImpl(writer);
+                try ie.formatGenImpl(mode, nonterms, writer);
             },
             .memo => |eid| {
                 _ = try writer.write("P.memo(&");
-                try eid.expr.formatGenImpl(writer);
+                try eid.expr.formatGenImpl(mode, nonterms, writer);
                 try writer.print(", {})", .{eid.id});
             },
             .cap => |eid| {
                 _ = try writer.write("P.capture(&");
-                try eid.expr.formatGenImpl(writer);
+                try eid.expr.formatGenImpl(mode, nonterms, writer);
                 try writer.print(", {})", .{eid.id});
             },
         }
