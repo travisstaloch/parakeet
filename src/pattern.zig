@@ -32,11 +32,11 @@ pub const Result = struct {
 
 pub const MemoTable = std.AutoHashMapUnmanaged(Result.Ok, Result);
 
-pub fn ParseContext(comptime Grammar: type, comptime CaptureHandler: type) type {
+pub fn ParseContext(comptime CaptureHandler: type) type {
     return struct {
         input: pk.Input,
         rule_id: u32,
-        rules: [*]const Rule(G.NonTerminal, PatternMut),
+        rules: [*]const Rule(PatternMut),
         memo: MemoTable = .{},
         allocator: mem.Allocator,
         capture_handler: if (C == void) void else *CaptureHandler,
@@ -47,7 +47,6 @@ pub fn ParseContext(comptime Grammar: type, comptime CaptureHandler: type) type 
             void = if (is_debug_mode) .{} else {},
 
         pub const Ctx = @This();
-        pub const G = Grammar;
         pub const C = CaptureHandler;
         pub const Options = struct {
             allocator: mem.Allocator = pk.failing_allocator,
@@ -58,9 +57,9 @@ pub fn ParseContext(comptime Grammar: type, comptime CaptureHandler: type) type 
 
         /// initializes 'rules' and 'allocator' fields. 'input' and 'rule_id'
         /// will be set in Pattern.parse
-        pub fn init(options: Options) !Ctx {
+        pub fn init(options: Options, grammar: Expr) !Ctx {
             const rules = try Pattern.optimize(
-                G,
+                grammar,
                 options.allocator,
                 options.mode,
             );
@@ -92,6 +91,23 @@ pub fn ParseContext(comptime Grammar: type, comptime CaptureHandler: type) type 
             }
         }
     };
+}
+
+pub fn parse(
+    comptime Ctx: type,
+    ctx: *Ctx,
+    start_rule_id: u32,
+    input: []const u8,
+) Result {
+    ctx.input = pk.input(input);
+    ctx.rule_id = start_rule_id;
+    ctx.memo.clearRetainingCapacity();
+
+    var result: Result = undefined;
+    const pat = ctx.rules[ctx.rule_id].pattern;
+    pat.run(Ctx, ctx, &result);
+
+    return result;
 }
 
 pub const Literal = struct { ptr: [*]const u8, len: u32 };
@@ -178,25 +194,8 @@ pub const Pattern = union(enum) {
         return .{ .cap = .{ .pat = payload, .id = id } };
     }
 
-    pub fn parse(
-        comptime Ctx: type,
-        ctx: *Ctx,
-        start_rule_id: u32,
-        input: []const u8,
-    ) Result {
-        ctx.input = pk.input(input);
-        ctx.rule_id = start_rule_id;
-        ctx.memo.clearRetainingCapacity();
-
-        var result: Result = undefined;
-        const pat = ctx.rules[ctx.rule_id].pattern;
-        pat.run(Ctx, ctx, &result);
-
-        return result;
-    }
-
     /// if all choices are charsets or single chars, return a class of the union
-    fn combineAlt(pats: []const Pattern) ?Expr.Class.Set {
+    fn combineAlt(pats: []const PatternMut) ?Expr.Class.Set {
         for (pats) |pat| {
             if (!(pat == .class or
                 (pat == .literal and pat.literal.len == 1)))
@@ -294,7 +293,7 @@ pub const Pattern = union(enum) {
     }
 
     /// combine sequences of literals into a single literal
-    fn combineSeq(pats: []const Pattern, arena: mem.Allocator) !?PatternMut {
+    fn combineSeq(pats: []const PatternMut, arena: mem.Allocator) !?PatternMut {
         const ok = for (pats) |pat| {
             if (!(pat == .literal or pat == .empty)) break false;
         } else true;
@@ -310,8 +309,9 @@ pub const Pattern = union(enum) {
     }
 
     fn optimizeImpl(
-        comptime G: type,
-        pat: Pattern,
+        gexpr: Expr,
+        pat: PatternMut,
+        map: Expr.NonTerminalIdMap,
         depth: u8,
         arena: mem.Allocator,
         mode: OptimizeMode,
@@ -325,99 +325,175 @@ pub const Pattern = union(enum) {
                         return .{ .class = klass };
                     }
                 }
-                const r = try arena.alloc(PatternMut, pats.len);
                 for (0..pats.len) |i|
-                    r[i] = try optimizeImpl(G, pats[i], depth + 1, arena, mode);
+                    pats[i] = try optimizeImpl(gexpr, pats[i], map, depth + 1, arena, mode);
 
                 if (mode == .optimized) {
-                    return if (try reduceAlt(r, arena)) |reduced|
+                    return if (try reduceAlt(pats, arena)) |reduced|
                         reduced
                     else
-                        .{ .alt = r };
-                } else return .{ .alt = r };
+                        .{ .alt = pats };
+                } else return .{ .alt = pats };
             },
             .seq => |pats| {
                 if (mode == .optimized)
                     if (try combineSeq(pats, arena)) |r| return r;
-                const r = try arena.alloc(PatternMut, pats.len);
                 for (0..pats.len) |i|
-                    r[i] = try optimizeImpl(G, pats[i], depth + 1, arena, mode);
-                return .{ .seq = r };
+                    pats[i] = try optimizeImpl(gexpr, pats[i], map, depth + 1, arena, mode);
+                return .{ .seq = pats };
             },
-            inline .not, .amp, .opt, .many => |p, tag| {
-                const r = try arena.create(PatternMut);
-                r.* = try optimizeImpl(G, p.*, depth, arena, mode);
-                return @unionInit(PatternMut, @tagName(tag), r);
+            .not, .amp, .opt, .many => |p| {
+                p.* = try optimizeImpl(gexpr, p.*, map, depth, arena, mode);
+                return pat;
             },
-            inline .literal, .class => |p, tag| {
-                return @unionInit(PatternMut, @tagName(tag), p);
-            },
+            .literal => |lit| return .{ .literal = lit },
+            .class => |klass| return .{ .class = klass },
+            // inline nonterminals up to 2 levels deep. 2 levels was an arbitrary decision
+            // TODO consider dealying inlining to a later pass
             .nonterm => |id| return if (depth < 2)
-                try optimizeImpl(G, G.rules[id].pattern, depth + 1, arena, mode)
+                try optimizeImpl(gexpr, try fromExpr(arena, gexpr.grammar[id][1], map), map, depth + 1, arena, mode)
             else
                 .{ .nonterm = id },
             .dot => return .dot,
             .empty => return .empty,
             .eos => return .eos,
-            inline .memo, .cap => |m, tag| {
-                const patid = PatternMut.PatternId{
-                    .pat = blk: {
-                        const r = try arena.create(PatternMut);
-                        r.* = try optimizeImpl(G, m.pat.*, depth, arena, mode);
-                        break :blk r;
-                    },
-                    .id = m.id,
-                };
-                return @unionInit(PatternMut, @tagName(tag), patid);
+            .memo, .cap => |m| {
+                m.pat.* = try optimizeImpl(gexpr, m.pat.*, map, depth, arena, mode);
+                return pat;
             },
         };
     }
 
     pub const OptimizeMode = enum { optimized, unoptimized };
 
-    /// convert the rules from the grammar G to an optimized, mutable format on
-    /// the heap for better performance.
+    /// convert 'e' to a PatternMut
+    pub fn fromExpr(
+        arena: mem.Allocator,
+        e: Expr,
+        map: Expr.NonTerminalIdMap,
+    ) !PatternMut {
+        return switch (e) {
+            .ident => |s| .{ .nonterm = map.get(s) orelse {
+                std.log.err("grammar error: invalid nonterminal '{s}'\n", .{s});
+                return error.InvalidNonTerminal;
+            } },
+            .litS, .litD => |s| .{ .literal = .{ .ptr = s.ptr, .len = @intCast(s.len) } },
+            .class => |c| blk: {
+                const ptr = try arena.create(Expr.Class);
+                ptr.* = c;
+                break :blk .{ .class = ptr };
+            },
+            .dot => .dot,
+            inline .amp, .not, .opt => |ie, tag| blk: {
+                const ptr = try arena.create(PatternMut);
+                ptr.* = try fromExpr(arena, ie.*, map);
+                break :blk @unionInit(PatternMut, @tagName(tag), ptr);
+            },
+            .star => |ie| blk: {
+                const ptr = try arena.create(PatternMut);
+                ptr.* = try fromExpr(arena, ie.*, map);
+                break :blk .{ .many = ptr };
+            },
+            .plus => |ie| blk: {
+                const ptr = try arena.create(PatternMut);
+                const pat = try fromExpr(arena, ie.*, map);
+                ptr.* = pat;
+                const items = try arena.alloc(PatternMut, 2);
+                items[0] = pat;
+                items[1] = .{ .many = ptr };
+                break :blk .{ .seq = items };
+            },
+            .group => |ie| try fromExpr(arena, ie.*, map),
+            .memo => |m| blk: {
+                const ptr = try arena.create(PatternMut);
+                ptr.* = try fromExpr(arena, m.expr.*, map);
+                break :blk .{ .memo = .{ .pat = ptr, .id = m.id } };
+            },
+            .cap => |m| blk: {
+                const ptr = try arena.create(PatternMut);
+                ptr.* = try fromExpr(arena, m.expr.*, map);
+                break :blk .{ .cap = .{ .pat = ptr, .id = m.id } };
+            },
+            .alt => |es| blk: {
+                const ps = try arena.alloc(PatternMut, es.len);
+                for (0..es.len) |i| ps[i] = try fromExpr(arena, es[i], map);
+                break :blk .{ .alt = ps };
+            },
+            .seq => |es| blk: {
+                const ps = try arena.alloc(PatternMut, es.len);
+                for (0..es.len) |i| ps[i] = try fromExpr(arena, es[i], map);
+                break :blk .{ .seq = ps };
+            },
+            .empty => .empty,
+            .grammar => {
+                unreachable;
+            },
+        };
+    }
+
+    /// convert the rules from the grammar 'g' to an optimized format
     pub fn optimize(
-        comptime G: type,
+        gexpr: Expr,
         arena: mem.Allocator,
         mode: OptimizeMode,
-    ) ![]const Rule(G.NonTerminal, PatternMut) {
-        const rules = try arena.alloc(Rule(G.NonTerminal, PatternMut), G.rules.len);
-        for (0..G.rules.len) |i| {
-            rules[i].rule_id = G.rules[i].rule_id;
-            rules[i].pattern = try optimizeImpl(G, G.rules[i].pattern, 0, arena, mode);
-            rules[i].first_set = .{ .bitset = Expr.Class.Set.initEmpty() };
-            rules[i].nullability = nullability(G, G.rules[i].pattern, G.rules[i].rule_id);
+    ) ![]const Rule(PatternMut) {
+        var map = Expr.NonTerminalIdMap.init(arena);
+        defer map.deinit();
+        // 1. populate nonterm id map
+        for (gexpr.grammar, 0..) |r, i| try map.put(r[0], @truncate(i));
+
+        const rules = try arena.alloc(Rule(PatternMut), gexpr.grammar.len);
+        // 2. convert grammar to PatternMut and optimize
+        for (0..gexpr.grammar.len) |i| {
+            rules[i].rule_id = @truncate(i);
+            rules[i].rule_name = gexpr.grammar[i][0];
+            const pat = try fromExpr(arena, gexpr.grammar[i][1], map);
+            rules[i].pattern = try optimizeImpl(gexpr, pat, map, 0, arena, mode);
             // debug("optimize() rule={s} nullability={}\n", .{ @tagName(G.rules[i].rule_id), rules[i].nullability });
-            calcFirstSet(G, G.rules[i].pattern, &rules[i].first_set, G.rules[i].rule_id);
+        }
+
+        // 3. calculate nullability and first sets
+        for (rules) |*rule| {
+            rule.nullability = nullability(rule.pattern, rules, rule.rule_id);
+            rule.first_set = .{ .bitset = Expr.Class.Set.initEmpty() };
+            calcFirstSet(rule.pattern, rules, &rule.first_set, rule.rule_id);
         }
         return rules;
     }
 
-    pub fn nullability(comptime G: type, pat: Pattern, start_rule_id: G.NonTerminal) Nullability {
+    /// calculate whether 'pat' must consume some input (non-nullable) or if its
+    /// possible for it to succeed consuming no input (nullable).  returns .unknown
+    /// if a cycle is detected.
+    pub fn nullability(
+        pat: PatternMut,
+        rules: []const Rule(PatternMut),
+        start_rule_id: u32,
+    ) Nullability {
         return switch (pat) {
             .literal, .class, .dot => .non_nullable,
             .alt => |ps| for (ps) |p| {
-                if (nullability(G, p, start_rule_id) == .nullable) break .nullable;
+                if (nullability(p, rules, start_rule_id) == .nullable) break .nullable;
             } else .non_nullable,
             .seq => |ps| for (ps) |p| {
-                if (nullability(G, p, start_rule_id) == .non_nullable) break .non_nullable;
+                if (nullability(p, rules, start_rule_id) == .non_nullable) break .non_nullable;
             } else .nullable,
             .many, .opt, .not, .amp => .nullable,
             .eos, .empty => .nullable,
-            .memo, .cap => |m| nullability(G, m.pat.*, start_rule_id),
-            .nonterm => |id| if (@as(G.NonTerminal, @enumFromInt(id)) == start_rule_id)
+            .memo, .cap => |m| nullability(m.pat.*, rules, start_rule_id),
+            .nonterm => |id| if (id == start_rule_id)
                 .unknown
             else
-                nullability(G, G.rules[id].pattern, start_rule_id),
+                nullability(rules[id].pattern, rules, start_rule_id),
         };
     }
 
+    /// calculate the 'first set' for 'pat'.  this is a set of valid next
+    /// input characters for the pattern.
     pub fn calcFirstSet(
-        comptime G: type,
-        pat: Pattern,
+        pat: PatternMut,
+        rules: []const Rule(PatternMut),
         first_set: *Expr.Class,
-        start_rule_id: G.NonTerminal,
+        start_rule_id: u32,
     ) void {
         // debug("calcFirstSet {s}={} first_set={}\n", .{ @tagName(pat), pat, first_set.* });
         switch (pat) {
@@ -431,45 +507,45 @@ pub const Pattern = union(enum) {
             .alt => |ps| {
                 for (ps) |p| {
                     var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
-                    calcFirstSet(G, p, &c, start_rule_id);
+                    calcFirstSet(p, rules, &c, start_rule_id);
                     first_set.bitset.setUnion(c.bitset);
                 }
             },
             .seq => |ps| {
                 for (ps) |p| {
                     var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
-                    calcFirstSet(G, p, &c, start_rule_id);
+                    calcFirstSet(p, rules, &c, start_rule_id);
                     // debug("seq c={}\n", .{Expr{ .class = c }});
                     first_set.bitset.setUnion(c.bitset);
-                    if (nullability(G, p, start_rule_id) == .non_nullable) break;
+                    if (nullability(p, rules, start_rule_id) == .non_nullable)
+                        break;
                 }
             },
             .many, .opt => |p| {
                 var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
-                calcFirstSet(G, p.*, &c, start_rule_id);
+                calcFirstSet(p.*, rules, &c, start_rule_id);
                 first_set.bitset.setUnion(c.bitset);
             },
             .amp => |p| {
                 var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
-                calcFirstSet(G, p.*, &c, start_rule_id);
+                calcFirstSet(p.*, rules, &c, start_rule_id);
                 first_set.bitset.setIntersection(c.bitset);
             },
             .not => |p| {
                 if (p.* == .class) {
-                    // var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
-                    calcFirstSet(G, p.*, first_set, start_rule_id);
+                    calcFirstSet(p.*, rules, first_set, start_rule_id);
                     first_set.bitset.toggleAll();
                 } else {
                     var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
-                    calcFirstSet(G, p.*, &c, start_rule_id);
+                    calcFirstSet(p.*, rules, &c, start_rule_id);
                     first_set.bitset = c.bitset;
                 }
             },
-            .memo, .cap => |m| calcFirstSet(G, m.pat.*, first_set, start_rule_id),
+            .memo, .cap => |m| calcFirstSet(m.pat.*, rules, first_set, start_rule_id),
             .nonterm => |id| {
-                if (@as(G.NonTerminal, @enumFromInt(id)) != start_rule_id) {
+                if (id != start_rule_id) {
                     var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
-                    calcFirstSet(G, G.rules[id].pattern, &c, start_rule_id);
+                    calcFirstSet(rules[id].pattern, rules, &c, start_rule_id);
                     first_set.bitset.setUnion(c.bitset);
                 }
             },
@@ -482,16 +558,17 @@ pub const Pattern = union(enum) {
 
 pub const Nullability = enum { unknown, non_nullable, nullable };
 
-pub fn Rule(comptime NonTerminal: type, comptime Pat: type) type {
+pub fn Rule(comptime Pat: type) type {
     return struct {
-        rule_id: NonTerminal,
+        rule_id: u32,
+        rule_name: []const u8,
         pattern: Pat,
         /// set of possible first characters
         first_set: Expr.Class = .{ .bitset = Expr.Class.Set.initEmpty() },
         /// 'nullable' means that the rule may succeed without consuming any input
         nullability: Nullability,
 
-        pub fn init(rule_id: NonTerminal, pattern: Pat) @This() {
+        pub fn init(rule_id: u32, pattern: Pat) @This() {
             return .{
                 .rule_id = rule_id,
                 .pattern = pattern,
@@ -499,14 +576,8 @@ pub fn Rule(comptime NonTerminal: type, comptime Pat: type) type {
                 .nullability = .unknown,
             };
         }
-
-        pub fn nonterm(nt: NonTerminal) Pattern {
-            return Pattern.nonterm(@intFromEnum(nt));
-        }
     };
 }
-
-pub const Rule2 = struct { []const u8, pk.pattern.Pattern };
 
 const debug = std.debug.print;
 
@@ -555,7 +626,7 @@ pub const PatternMut = union(enum) {
         const debugthis = false;
         if (debugthis) {
             debug("{} ", .{in});
-            if (pat != .nonterm) debug("{}\n", .{pat});
+            if (pat != .nonterm) debug("{} {s}\n", .{ pat, @tagName(pat) });
         }
         switch (pat) {
             .nonterm => |id| {
@@ -569,7 +640,7 @@ pub const PatternMut = union(enum) {
                         break :blk;
 
                     if (debugthis)
-                        debug("{s} first_set {} missing '{?c}'\n", .{ @tagName(rule.rule_id), rule.first_set, mc });
+                        debug("{s} first_set {} missing '{?c}'\n", .{ ctx.rules[id].rule_name, rule.first_set, mc });
                     res.* = Result.err(in);
                     return;
                 }
@@ -578,9 +649,9 @@ pub const PatternMut = union(enum) {
                     if (is_debug_mode) ctx.nonterm_trail.len = traillen;
                 }
                 if (is_debug_mode) {
-                    const tagname = @tagName(rule.rule_id);
-                    const len = @min(ctx.nonterm_trail.buffer.len - ctx.nonterm_trail.len, tagname.len);
-                    ctx.nonterm_trail.appendSlice(tagname[0..len]) catch unreachable;
+                    const rulename = ctx.rules[id].rule_name; //@tagName(rule.rule_id);
+                    const len = @min(ctx.nonterm_trail.buffer.len - ctx.nonterm_trail.len, rulename.len);
+                    ctx.nonterm_trail.appendSlice(rulename[0..len]) catch unreachable;
                     ctx.nonterm_trail.append(',') catch {};
                 }
 
@@ -588,8 +659,12 @@ pub const PatternMut = union(enum) {
                 defer ctx.rule_id = prev_id;
                 ctx.rule_id = id;
                 const p = rule.pattern;
-                if (debugthis)
-                    debug("{s} {s}\n", .{ ctx.nonterm_trail.constSlice(), @tagName(p) });
+                if (debugthis) {
+                    if (is_debug_mode)
+                        debug("{s} {s}\n", .{ ctx.nonterm_trail.constSlice(), @tagName(p) })
+                    else
+                        debug("{s}\n", .{@tagName(p)});
+                }
                 @call(.always_tail, run, .{ p, Ctx, ctx, res });
             },
             .literal => |lit| {

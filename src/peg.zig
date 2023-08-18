@@ -480,7 +480,7 @@ pub const Expr = union(enum) {
                         \\pub fn grammar(
                         \\    comptime pk: type,
                         \\    comptime options: struct { eval_branch_quota: usize = 1000 },
-                        \\) []const pk.pattern.Rule2 {
+                        \\) []const struct { []const u8, pk.pattern.Pattern } {
                         \\        @setEvalBranchQuota(options.eval_branch_quota);
                         \\
                     );
