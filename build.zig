@@ -5,10 +5,6 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const options = b.addOptions();
-    // TODO remove this flag once its possible to construct and use a grammar map at runtime
-    const grammar = b.option([]const u8, "grammar", "which grammar to use. " ++
-        " must be either 'peg' or 'zig'") orelse "";
-    options.addOption([]const u8, "grammar", grammar);
 
     const parakeet_mod = b.addModule("parakeet", .{
         .source_file = .{ .path = "src/lib.zig" },
