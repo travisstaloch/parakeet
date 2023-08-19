@@ -1,7 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
 const pk = @import("parakeet");
-const Pattern = pk.pattern.Pattern;
 const peg = pk.peg;
 const Expr = peg.Expr;
 const talloc = testing.allocator;
@@ -111,35 +110,32 @@ test "invalid char class" {
 }
 
 test "pattern optimizations" {
-    // !. => .eos
-    try testing.expectEqual(Pattern.Tag.eos, comptime Pattern.not(&Pattern.dot()));
     {
         const input =
-            \\a <- "a" / [bc-e] # => [a-e]
+            \\eos <- !.             # => .eos
+            \\a   <- "a" / [bc-e]   # => [a-e]
+            \\b   <- b c / b d      # => b (c / d)
+            \\c   <- 'c'
+            \\d   <- 'd'
         ;
         var arena = std.heap.ArenaAllocator.init(talloc);
         defer arena.deinit();
         const g = try pk.peg.parseString(pk.peg.parsers.grammar, input, arena.allocator());
         const Ctx = pk.pattern.ParseContext(void);
         var ctx = try Ctx.init(.{ .allocator = arena.allocator() }, g);
-        const p = ctx.rules[0].pattern;
-        try testing.expect(p == .class);
-        try expectFormat("[a-e]", "{}", .{p.class});
-    }
-    {
-        const input =
-            \\a <- a b / a c # => a (b / c)
-            \\b <- 'b'
-            \\c <- 'c'
-        ;
-        var arena = std.heap.ArenaAllocator.init(talloc);
-        defer arena.deinit();
-        const g = try pk.peg.parseString(pk.peg.parsers.grammar, input, arena.allocator());
-        const Ctx = pk.pattern.ParseContext(void);
-        var ctx = try Ctx.init(.{ .allocator = arena.allocator() }, g);
-        const p = ctx.rules[0].pattern;
-        try testing.expect(p == .seq);
-        try expectFormat("0 ( 1 / 2 )", "{}", .{p});
+
+        try testing.expectEqual(pk.pattern.Pattern.Tag.eos, ctx.rules[0].pattern);
+
+        {
+            const p = ctx.rules[1].pattern;
+            try testing.expect(p == .class);
+            try expectFormat("[a-e]", "{}", .{p.class});
+        }
+        {
+            const p = ctx.rules[2].pattern;
+            try testing.expect(p == .seq);
+            try expectFormat("2 ( 3 / 4 )", "{}", .{p});
+        }
     }
 }
 

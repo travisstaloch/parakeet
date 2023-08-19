@@ -36,7 +36,7 @@ pub fn ParseContext(comptime CaptureHandler: type) type {
     return struct {
         input: pk.Input,
         rule_id: u32,
-        rules: [*]const Rule(PatternMut),
+        rules: [*]const Rule,
         memo: MemoTable = .{},
         allocator: mem.Allocator,
         capture_handler: if (C == void) void else *CaptureHandler,
@@ -112,16 +112,39 @@ pub fn parse(
 
 pub const Literal = struct { ptr: [*]const u8, len: u32 };
 
-/// a data format similar to Expr for encoding parsers
+pub const Nullability = enum { unknown, non_nullable, nullable };
+
+const Rule = struct {
+    rule_id: u32,
+    rule_name: []const u8,
+    pattern: Pattern,
+    /// set of possible first characters
+    first_set: Expr.Class = .{ .bitset = Expr.Class.Set.initEmpty() },
+    /// 'nullable' means that the rule may succeed without consuming any input
+    nullability: Nullability,
+
+    pub fn init(rule_id: u32, pattern: Pattern) Rule {
+        return .{
+            .rule_id = rule_id,
+            .pattern = pattern,
+            .first_set = .{ .bitset = Expr.Class.Set.initEmpty() },
+            .nullability = .unknown,
+        };
+    }
+};
+
+const debug = std.debug.print;
+
+/// a data format similar to Expr for optimizing and running parsers
 pub const Pattern = union(enum) {
     literal: Literal,
     class: *const Expr.Class,
-    alt: []const Pattern,
-    seq: []const Pattern,
-    many: *const Pattern,
-    opt: *const Pattern,
-    not: *const Pattern,
-    amp: *const Pattern,
+    alt: []Pattern,
+    seq: []Pattern,
+    many: *Pattern,
+    opt: *Pattern,
+    not: *Pattern,
+    amp: *Pattern,
     memo: PatternId,
     cap: PatternId,
     nonterm: u32,
@@ -133,69 +156,10 @@ pub const Pattern = union(enum) {
         std.debug.assert(24 == @sizeOf(Pattern));
     }
     pub const Tag = std.meta.Tag(Pattern);
-    pub const PatternId = struct { pat: *const Pattern, id: u32 };
-
-    pub fn format(
-        p: Pattern,
-        comptime fmt: []const u8,
-        opts: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        return formatImpl(Pattern, @TypeOf(writer).Error, p, fmt, opts, writer, 0);
-    }
-
-    pub fn literal(payload: []const u8) Pattern {
-        return .{ .literal = .{
-            .ptr = payload.ptr,
-            .len = @intCast(payload.len),
-        } };
-    }
-    pub fn class(payload: *const Expr.Class) Pattern {
-        return .{ .class = payload };
-    }
-    pub fn alt(payload: []const Pattern) Pattern {
-        return .{ .alt = payload };
-    }
-    pub fn seq(payload: []const Pattern) Pattern {
-        return .{ .seq = payload };
-    }
-    pub fn many(payload: *const Pattern) Pattern {
-        return .{ .many = payload };
-    }
-    pub fn opt(payload: *const Pattern) Pattern {
-        return .{ .opt = payload };
-    }
-    pub fn not(payload: *const Pattern) Pattern {
-        return switch (payload.*) {
-            .dot => .eos,
-            else => .{ .not = payload },
-        };
-    }
-    pub fn amp(payload: *const Pattern) Pattern {
-        return .{ .amp = payload };
-    }
-    pub fn nonterm(payload: u32) Pattern {
-        return .{ .nonterm = payload };
-    }
-    pub fn nontermNamed(name: []const u8, payload: u32) Pattern {
-        _ = name;
-        return .{ .nonterm = payload };
-    }
-    pub fn dot() Pattern {
-        return .dot;
-    }
-    pub fn empty() Pattern {
-        return .empty;
-    }
-    pub fn memo(payload: *const Pattern, id: u32) Pattern {
-        return .{ .memo = .{ .pat = payload, .id = id } };
-    }
-    pub fn capture(payload: *const Pattern, id: u32) Pattern {
-        return .{ .cap = .{ .pat = payload, .id = id } };
-    }
+    pub const PatternId = struct { pat: *Pattern, id: u32 };
 
     /// if all choices are charsets or single chars, return a class of the union
-    fn combineAlt(pats: []const PatternMut) ?Expr.Class.Set {
+    fn combineAlt(pats: []const Pattern) ?Expr.Class.Set {
         for (pats) |pat| {
             if (!(pat == .class or
                 (pat == .literal and pat.literal.len == 1)))
@@ -215,14 +179,14 @@ pub const Pattern = union(enum) {
         return bitset;
     }
 
-    fn firstOfSeq(pat: PatternMut) ?PatternMut {
+    fn firstOfSeq(pat: Pattern) ?Pattern {
         if (pat != .seq) return null;
         std.debug.assert(pat.seq.len > 0);
         return pat.seq[0];
     }
 
-    pub fn eql(p: PatternMut, other: PatternMut) bool {
-        return @as(PatternMut.Tag, p) == @as(PatternMut.Tag, other) and
+    pub fn eql(p: Pattern, other: Pattern) bool {
+        return @as(Pattern.Tag, p) == @as(Pattern.Tag, other) and
             switch (p) {
             .literal => |lit| lit.len == other.literal.len and pk.util.eql(
                 lit.ptr[0..lit.len],
@@ -268,7 +232,7 @@ pub const Pattern = union(enum) {
     /// e3 only causes the first alternative to fail; the second alternative
     /// will then be tried, in which the e3 might succeed if e2 consumes a
     /// different amount of input than e1 did.
-    fn reduceAlt(pats: []PatternMut, arena: mem.Allocator) !?PatternMut {
+    fn reduceAlt(pats: []Pattern, arena: mem.Allocator) !?Pattern {
         // TODO hoist longest common sequence
         std.debug.assert(pats.len > 1);
         const e1 = firstOfSeq(pats[0]) orelse return null;
@@ -285,7 +249,7 @@ pub const Pattern = union(enum) {
                 .{ .seq = tmp[1..] };
         }
 
-        const newseq = try arena.alloc(PatternMut, 2);
+        const newseq = try arena.alloc(Pattern, 2);
         newseq[0] = e1;
         newseq[1] = .{ .alt = pats };
 
@@ -293,7 +257,7 @@ pub const Pattern = union(enum) {
     }
 
     /// combine sequences of literals into a single literal
-    fn combineSeq(pats: []const PatternMut, arena: mem.Allocator) !?PatternMut {
+    fn combineSeq(pats: []const Pattern, arena: mem.Allocator) !?Pattern {
         const ok = for (pats) |pat| {
             if (!(pat == .literal or pat == .empty)) break false;
         } else true;
@@ -310,12 +274,12 @@ pub const Pattern = union(enum) {
 
     fn optimizeImpl(
         gexpr: Expr,
-        pat: PatternMut,
+        pat: Pattern,
         map: Expr.NonTerminalIdMap,
         depth: u8,
         arena: mem.Allocator,
         mode: OptimizeMode,
-    ) !PatternMut {
+    ) !Pattern {
         return switch (pat) {
             .alt => |pats| {
                 if (mode == .optimized) {
@@ -366,12 +330,12 @@ pub const Pattern = union(enum) {
 
     pub const OptimizeMode = enum { optimized, unoptimized };
 
-    /// convert 'e' to a PatternMut
+    /// convert 'e' to a Pattern
     pub fn fromExpr(
         arena: mem.Allocator,
         e: Expr,
         map: Expr.NonTerminalIdMap,
-    ) !PatternMut {
+    ) !Pattern {
         return switch (e) {
             .ident => |s| .{ .nonterm = map.get(s) orelse {
                 std.log.err("grammar error: invalid nonterminal '{s}'\n", .{s});
@@ -384,43 +348,48 @@ pub const Pattern = union(enum) {
                 break :blk .{ .class = ptr };
             },
             .dot => .dot,
-            inline .amp, .not, .opt => |ie, tag| blk: {
-                const ptr = try arena.create(PatternMut);
+            inline .amp, .opt => |ie, tag| blk: {
+                const ptr = try arena.create(Pattern);
                 ptr.* = try fromExpr(arena, ie.*, map);
-                break :blk @unionInit(PatternMut, @tagName(tag), ptr);
+                break :blk @unionInit(Pattern, @tagName(tag), ptr);
+            },
+            .not => |ie| if (ie.* == .dot) .eos else blk: {
+                const ptr = try arena.create(Pattern);
+                ptr.* = try fromExpr(arena, ie.*, map);
+                break :blk .{ .not = ptr };
             },
             .star => |ie| blk: {
-                const ptr = try arena.create(PatternMut);
+                const ptr = try arena.create(Pattern);
                 ptr.* = try fromExpr(arena, ie.*, map);
                 break :blk .{ .many = ptr };
             },
             .plus => |ie| blk: {
-                const ptr = try arena.create(PatternMut);
+                const ptr = try arena.create(Pattern);
                 const pat = try fromExpr(arena, ie.*, map);
                 ptr.* = pat;
-                const items = try arena.alloc(PatternMut, 2);
+                const items = try arena.alloc(Pattern, 2);
                 items[0] = pat;
                 items[1] = .{ .many = ptr };
                 break :blk .{ .seq = items };
             },
             .group => |ie| try fromExpr(arena, ie.*, map),
             .memo => |m| blk: {
-                const ptr = try arena.create(PatternMut);
+                const ptr = try arena.create(Pattern);
                 ptr.* = try fromExpr(arena, m.expr.*, map);
                 break :blk .{ .memo = .{ .pat = ptr, .id = m.id } };
             },
             .cap => |m| blk: {
-                const ptr = try arena.create(PatternMut);
+                const ptr = try arena.create(Pattern);
                 ptr.* = try fromExpr(arena, m.expr.*, map);
                 break :blk .{ .cap = .{ .pat = ptr, .id = m.id } };
             },
             .alt => |es| blk: {
-                const ps = try arena.alloc(PatternMut, es.len);
+                const ps = try arena.alloc(Pattern, es.len);
                 for (0..es.len) |i| ps[i] = try fromExpr(arena, es[i], map);
                 break :blk .{ .alt = ps };
             },
             .seq => |es| blk: {
-                const ps = try arena.alloc(PatternMut, es.len);
+                const ps = try arena.alloc(Pattern, es.len);
                 for (0..es.len) |i| ps[i] = try fromExpr(arena, es[i], map);
                 break :blk .{ .seq = ps };
             },
@@ -436,7 +405,7 @@ pub const Pattern = union(enum) {
         gexpr: Expr,
         arena: mem.Allocator,
         mode: OptimizeMode,
-    ) ![]const Rule(PatternMut) {
+    ) ![]const Rule {
         var map = Expr.NonTerminalIdMap.init(arena);
         defer map.deinit();
         // 1. populate nonterm id map
@@ -449,8 +418,8 @@ pub const Pattern = union(enum) {
             gop.value_ptr.* = @truncate(i);
         }
 
-        const rules = try arena.alloc(Rule(PatternMut), gexpr.grammar.len);
-        // 2. convert grammar to PatternMut and optimize
+        const rules = try arena.alloc(Rule, gexpr.grammar.len);
+        // 2. convert grammar to Pattern and optimize
         for (0..gexpr.grammar.len) |i| {
             rules[i].rule_id = @truncate(i);
             rules[i].rule_name = gexpr.grammar[i][0];
@@ -472,8 +441,8 @@ pub const Pattern = union(enum) {
     /// possible for it to succeed consuming no input (nullable).  returns .unknown
     /// if a cycle is detected.
     pub fn nullability(
-        pat: PatternMut,
-        rules: []const Rule(PatternMut),
+        pat: Pattern,
+        rules: []const Rule,
         start_rule_id: u32,
     ) Nullability {
         return switch (pat) {
@@ -497,8 +466,8 @@ pub const Pattern = union(enum) {
     /// calculate the 'first set' for 'pat'.  this is a set of valid next
     /// input characters for the pattern.
     pub fn calcFirstSet(
-        pat: PatternMut,
-        rules: []const Rule(PatternMut),
+        pat: Pattern,
+        rules: []const Rule,
         first_set: *Expr.Class,
         start_rule_id: u32,
     ) void {
@@ -561,70 +530,12 @@ pub const Pattern = union(enum) {
         }
         // debug("calcFirstSet end {s}={} first_set={}\n", .{ @tagName(pat), pat, first_set.* });
     }
-};
-
-pub const Nullability = enum { unknown, non_nullable, nullable };
-
-pub fn Rule(comptime Pat: type) type {
-    return struct {
-        rule_id: u32,
-        rule_name: []const u8,
-        pattern: Pat,
-        /// set of possible first characters
-        first_set: Expr.Class = .{ .bitset = Expr.Class.Set.initEmpty() },
-        /// 'nullable' means that the rule may succeed without consuming any input
-        nullability: Nullability,
-
-        pub fn init(rule_id: u32, pattern: Pat) @This() {
-            return .{
-                .rule_id = rule_id,
-                .pattern = pattern,
-                .first_set = .{ .bitset = Expr.Class.Set.initEmpty() },
-                .nullability = .unknown,
-            };
-        }
-    };
-}
-
-const debug = std.debug.print;
-
-/// a data format similar to Expr for running parsers
-pub const PatternMut = union(enum) {
-    literal: Literal,
-    class: *const Expr.Class,
-    alt: []PatternMut,
-    seq: []PatternMut,
-    many: *PatternMut,
-    opt: *PatternMut,
-    not: *PatternMut,
-    amp: *PatternMut,
-    memo: PatternId,
-    cap: PatternId,
-    nonterm: u32,
-    dot,
-    eos,
-    empty,
-
-    comptime {
-        std.debug.assert(24 == @sizeOf(PatternMut));
-    }
-    pub const Tag = std.meta.Tag(PatternMut);
-    pub const PatternId = struct { pat: *PatternMut, id: u32 };
-
-    pub fn format(
-        p: PatternMut,
-        comptime fmt: []const u8,
-        opts: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        return formatImpl(PatternMut, @TypeOf(writer).Error, p, fmt, opts, writer, 0);
-    }
 
     // run() is recursive so it is optimized to reduce fn call overhead by
     // passing 'ctx' and 'res' as pointers. because of this, they are often
     //  reused below and some control flow may be sligntly non-intuitive.
     pub fn run(
-        pat: PatternMut,
+        pat: Pattern,
         comptime Ctx: type,
         ctx: *Ctx,
         res: *Result,
@@ -774,66 +685,73 @@ pub const PatternMut = union(enum) {
             },
         }
     }
-};
 
-fn formatImpl(
-    comptime Pat: type,
-    comptime E: type,
-    pat: Pat,
-    comptime fmt: []const u8,
-    opts: std.fmt.FormatOptions,
-    writer: anytype,
-    depth: u8,
-) E!void {
-    // try writer.print("{s}: ", .{@tagName(pat)});
-    switch (pat) {
-        .literal => |lit| {
-            try writer.writeByte('"');
-            try Expr.unescape(.{ .litD = lit.ptr[0..lit.len] }, writer);
-            try writer.writeByte('"');
-        },
-        .nonterm => |id| _ = try writer.print("{}", .{id}),
-        .class => |klass| try writer.print("{}", .{klass}),
-        .alt => |pats| {
-            if (depth != 0) _ = try writer.write("( ");
-            for (pats, 0..) |p, i| {
-                if (i != 0) _ = try writer.write(" / ");
-                try formatImpl(Pat, E, p, fmt, opts, writer, depth + 1);
-            }
-            if (depth != 0) _ = try writer.write(" )");
-        },
-        .seq => |pats| for (pats, 0..) |p, i| {
-            if (i != 0) try writer.writeByte(' ');
-            try formatImpl(Pat, E, p, fmt, opts, writer, depth + 1);
-        },
-        .many => |ip| {
-            try formatImpl(Pat, E, ip.*, fmt, opts, writer, depth);
-            try writer.writeByte('*');
-        },
-        .opt => |ip| {
-            try formatImpl(Pat, E, ip.*, fmt, opts, writer, depth);
-            try writer.writeByte('?');
-        },
-        .memo => |patid| {
-            _ = try writer.write("{{ ");
-            try formatImpl(Pat, E, patid.pat.*, fmt, opts, writer, depth);
-            _ = try writer.write(" }}");
-        },
-        .cap => |patid| {
-            _ = try writer.write("{ ");
-            try formatImpl(Pat, E, patid.pat.*, fmt, opts, writer, depth);
-            _ = try writer.write(" }");
-        },
-        .eos => _ = try writer.write("!."),
-        .empty => {},
-        .not => |ip| {
-            _ = try writer.writeByte('!');
-            try formatImpl(Pat, E, ip.*, fmt, opts, writer, depth);
-        },
-        .amp => |ip| {
-            _ = try writer.writeByte('&');
-            try formatImpl(Pat, E, ip.*, fmt, opts, writer, depth);
-        },
-        .dot => _ = try writer.writeByte('.'),
+    pub fn format(
+        p: Pattern,
+        comptime fmt: []const u8,
+        opts: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        return formatImpl(p, fmt, opts, writer, 0);
     }
-}
+
+    fn formatImpl(
+        pat: Pattern,
+        comptime fmt: []const u8,
+        opts: std.fmt.FormatOptions,
+        writer: anytype,
+        depth: u8,
+    ) !void {
+        // try writer.print("{s}: ", .{@tagName(pat)});
+        switch (pat) {
+            .literal => |lit| {
+                try writer.writeByte('"');
+                try Expr.unescape(.{ .litD = lit.ptr[0..lit.len] }, writer);
+                try writer.writeByte('"');
+            },
+            .nonterm => |id| _ = try writer.print("{}", .{id}),
+            .class => |klass| try writer.print("{}", .{klass}),
+            .alt => |pats| {
+                if (depth != 0) _ = try writer.write("( ");
+                for (pats, 0..) |p, i| {
+                    if (i != 0) _ = try writer.write(" / ");
+                    try formatImpl(p, fmt, opts, writer, depth + 1);
+                }
+                if (depth != 0) _ = try writer.write(" )");
+            },
+            .seq => |pats| for (pats, 0..) |p, i| {
+                if (i != 0) try writer.writeByte(' ');
+                try formatImpl(p, fmt, opts, writer, depth + 1);
+            },
+            .many => |ip| {
+                try formatImpl(ip.*, fmt, opts, writer, depth);
+                try writer.writeByte('*');
+            },
+            .opt => |ip| {
+                try formatImpl(ip.*, fmt, opts, writer, depth);
+                try writer.writeByte('?');
+            },
+            .memo => |patid| {
+                _ = try writer.write("{{ ");
+                try formatImpl(patid.pat.*, fmt, opts, writer, depth);
+                _ = try writer.write(" }}");
+            },
+            .cap => |patid| {
+                _ = try writer.write("{ ");
+                try formatImpl(patid.pat.*, fmt, opts, writer, depth);
+                _ = try writer.write(" }");
+            },
+            .eos => _ = try writer.write("!."),
+            .empty => {},
+            .not => |ip| {
+                _ = try writer.writeByte('!');
+                try formatImpl(ip.*, fmt, opts, writer, depth);
+            },
+            .amp => |ip| {
+                _ = try writer.writeByte('&');
+                try formatImpl(ip.*, fmt, opts, writer, depth);
+            },
+            .dot => _ = try writer.writeByte('.'),
+        }
+    }
+};
