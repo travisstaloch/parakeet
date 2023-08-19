@@ -440,7 +440,14 @@ pub const Pattern = union(enum) {
         var map = Expr.NonTerminalIdMap.init(arena);
         defer map.deinit();
         // 1. populate nonterm id map
-        for (gexpr.grammar, 0..) |r, i| try map.put(r[0], @truncate(i));
+        for (gexpr.grammar, 0..) |r, i| {
+            const gop = try map.getOrPut(r[0]);
+            if (gop.found_existing) {
+                std.log.err("grammar error: nonterminal with name '{s}' already exists\n", .{r[0]});
+                return error.InvalidNonTerminal;
+            }
+            gop.value_ptr.* = @truncate(i);
+        }
 
         const rules = try arena.alloc(Rule(PatternMut), gexpr.grammar.len);
         // 2. convert grammar to PatternMut and optimize

@@ -485,9 +485,12 @@ pub const Expr = union(enum) {
                         \\
                     );
                     for (rules, 0..) |rule, i| {
-                        nonterms.put(rule[0], @intCast(i)) catch |err| {
+                        const gop = nonterms.getOrPut(rule[0]) catch |err| {
                             std.debug.panic("unrecoverable grammar error: '{s}'\n", .{@errorName(err)});
                         };
+                        if (gop.found_existing)
+                            std.debug.panic("grammar error: redifinition of '{s}'\n", .{rule[0]});
+                        gop.value_ptr.* = @intCast(i);
                     }
                     _ = try writer.write(
                         \\    const P = pk.pattern.Pattern;
