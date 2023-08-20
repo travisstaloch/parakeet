@@ -60,20 +60,20 @@ test "negated char class matches not char class" {
 
     inline for (expecteds) |expected| {
         {
-            var ra: pk.pattern.Result = undefined;
+            var ra: Ctx.Result = undefined;
             ctx.input = pk.input(expected[0]);
             ctx.rules[0].pattern.run(Ctx, &ctx, &ra);
             // std.debug.print("negated={} r={} expected=({s},{})\n", .{ negated, r, expected[0], expected[1] });
             try testing.expect((ra.output != expected[1]));
         }
         {
-            var rb: pk.pattern.Result = undefined;
+            var rb: Ctx.Result = undefined;
             ctx.input = pk.input(expected[0]);
             ctx.rules[1].pattern.run(Ctx, &ctx, &rb);
             try testing.expect((rb.output == expected[1]));
         }
         {
-            var rc: pk.pattern.Result = undefined;
+            var rc: Ctx.Result = undefined;
             ctx.input = pk.input(expected[0]);
             ctx.rules[2].pattern.run(Ctx, &ctx, &rc);
             try testing.expect((rc.output == expected[1]));
@@ -174,7 +174,7 @@ test "first sets and nullability" {
 test "basic captures" {
     const input =
         \\S   <- foo bar
-        \\foo <- { "foo" }
+        \\foo <- { "foo" } : 0
         \\bar <- { "bar" }
     ;
     var arena = std.heap.ArenaAllocator.init(talloc);
@@ -182,10 +182,8 @@ test "basic captures" {
     const CaptureHandler = struct {
         captures: std.ArrayListUnmanaged([]const u8) = .{},
         allocator: std.mem.Allocator,
-        pub fn onCapture(self: *@This(), capid: u32, cap: []const u8) !void {
-            _ = capid;
-            // std.debug.print("text={s}\n", .{cap});
-            try self.captures.append(self.allocator, cap);
+        pub fn onCapture(self: *@This(), cap: pk.pattern.CaptureInfo) !void {
+            try self.captures.append(self.allocator, cap.text());
         }
     };
     var handler = CaptureHandler{ .allocator = arena.allocator() };
@@ -200,4 +198,101 @@ test "basic captures" {
     try testing.expect(r.output == .ok);
     try testing.expectEqualStrings("foo", handler.captures.items[0]);
     try testing.expectEqualStrings("bar", handler.captures.items[1]);
+}
+
+test "json parser with captures" {
+    const input =
+        \\doc           <- JSON !.
+        \\JSON          <- S_ ({Number}:0 / Object / Array / String / True / False / Null) S_
+        \\Object        <- {'{'}:0 ({String} ':' JSON (',' String ':' JSON)* / S_) {'}'}:1
+        \\Array         <- '[' (JSON (',' JSON)* / S_) ']'
+        \\StringBody    <- Escape? ((!["\\\00-\37] .)+ Escape*)*
+        \\String        <- S_ '"' StringBody '"' S_
+        \\Escape        <- '\\' (["{|\\bfnrt] / UnicodeEscape)
+        \\UnicodeEscape <- 'u' [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]
+        \\Number        <- Minus? IntPart FractPart? ExpPart?
+        \\Minus         <- '-'
+        \\IntPart       <- '0' / [1-9][0-9]*
+        \\FractPart     <- '.' [0-9]+
+        \\ExpPart       <- [eE] [+\-]? [0-9]+
+        \\True          <- 'true'
+        \\False         <- 'false'
+        \\Null          <- 'null'
+        \\S_            <- [\11-\15\40]*
+    ;
+    var arena = std.heap.ArenaAllocator.init(talloc);
+    defer arena.deinit();
+    const CaptureHandler = struct {
+        allocator: std.mem.Allocator,
+        state: State = .init,
+        as: std.ArrayListUnmanaged(A) = .{},
+        a: A = undefined,
+
+        const A = struct { b: u8 };
+        const State = enum { init, a, a_end, b, b_end };
+        pub fn onCapture(self: *@This(), cap: pk.pattern.CaptureInfo) !void {
+            // std.debug.print("capture {s}:{}:{}:'{s}' state={s}\n", .{
+            //     cap.rule_name,
+            //     cap.rule_id,
+            //     cap.id,
+            //     cap.text,
+            //     @tagName(self.state),
+            // });
+            const Id = pk.pattern.CaptureInfo.Id;
+
+            switch (cap.id.asInt()) {
+                Id.int(5, 2) => { // String - json key
+                    const text = cap.text();
+                    if (text.len < 2) return error.ParseFailure;
+                    const Field = enum { a, b };
+                    switch (std.meta.stringToEnum(
+                        Field,
+                        text[1 .. text.len - 1],
+                    ) orelse
+                        return error.ParseFailure) {
+                        .a => self.state = .a,
+                        .b => self.state = .b,
+                    }
+                },
+                Id.int(8, 0) => { // Number
+                    if (self.state != .b) return error.ParseFailure;
+                    self.a.b = try std.fmt.parseInt(u8, cap.text(), 10);
+                },
+                Id.int(8, 1) => {
+                    switch (self.state) {
+                        .b => self.state = .b_end,
+                        .b_end => {
+                            self.state = .a_end;
+                            try self.as.append(self.allocator, self.a);
+                            self.a = undefined;
+                        },
+                        else => {},
+                    }
+                },
+                else => {},
+            }
+        }
+    };
+    var handler = CaptureHandler{ .allocator = arena.allocator() };
+    const Ctx = pk.pattern.ParseContext(CaptureHandler);
+    const g = try pk.peg.parseString(pk.peg.parsers.grammar, input, arena.allocator());
+    var ctx = try Ctx.init(.{
+        .allocator = arena.allocator(),
+        .capture_handler = &handler,
+    }, g);
+
+    // std.debug.print("{s} <- {}\n", .{ g.grammar[3][0], g.grammar[3][1] });
+    const r = pk.pattern.parse(Ctx, &ctx, 0,
+        \\[
+        \\{"a": {"b": 0}},
+        \\{"a": {"b": 1}},
+        \\{"a": {"b": 2}}
+        \\]
+    );
+    // std.debug.print("{}\n", .{r.input});
+    try testing.expect(r.output == .ok);
+    try testing.expectEqual(@as(usize, 3), ctx.capture_handler.as.items.len);
+    try testing.expectEqual(@as(u8, 0), ctx.capture_handler.as.items[0].b);
+    try testing.expectEqual(@as(u8, 1), ctx.capture_handler.as.items[1].b);
+    try testing.expectEqual(@as(u8, 2), ctx.capture_handler.as.items[2].b);
 }
