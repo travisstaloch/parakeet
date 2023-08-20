@@ -167,12 +167,18 @@ pub const Expr = union(enum) {
         return .{ .memo = .{ .expr = o, .id = memoid } };
     }
     var capid: u32 = 0;
-    pub fn capture(e: Expr, mallocator: ?mem.Allocator) !Expr {
+    pub fn capture(e: Expr, capid_str: []const u8, mallocator: ?mem.Allocator) !Expr {
         const allocator = mallocator orelse return error.AllocatorRequired;
         const o = try allocator.create(Expr);
         o.* = e;
-        defer capid += 1;
-        return .{ .cap = .{ .expr = o, .id = capid } };
+        const has_capid_str = capid_str.len != 0;
+        defer {
+            if (!has_capid_str) capid += 1;
+        }
+        return .{ .cap = .{ .expr = o, .id = if (has_capid_str)
+            try std.fmt.parseInt(u32, capid_str, 10)
+        else
+            capid } };
     }
     pub fn group(e: Expr, mallocator: ?mem.Allocator) !Expr {
         // if its a single node, just return it. only allow seq and alt nodes in group
@@ -666,7 +672,7 @@ pub fn parseString(
 ) !ps.PType(@TypeOf(p)).Ok {
     const r = p.run(pk.input(s), .{ .allocator = allocator });
     if (r.output == .err) {
-        // debug("failed at {} err={}\n", .{ r.input, r.output.err });
+        // std.debug.print("failed at {} err={}\n", .{ r.input, r.output.err });
         return r.output.err;
     }
     return r.output.ok;
@@ -798,7 +804,12 @@ pub const ident_str = ps.seq(.{
     pub const capture = ps.seqMapAlloc(.{
         ps.discardSeq(.{ ps.str("{"), spacing }),
         ps.ref(exprRef),
-        ps.discardSeq(.{ ps.str("}"), spacing }),
+        ps.discardSeq(.{ ps.char('}'), spacing }),
+        ps.option(ps.seq(.{
+            ps.discardSeq(.{ ps.char(':'), spacing }),
+            ps.intToken(u16, .{ .max = std.math.log10(std.math.maxInt(u16)) }, 10),
+            spacing.discard(),
+        })),
     }, Expr.capture);
 
     pub const primary = ps.choice(.{
@@ -882,7 +893,10 @@ pub const ident_str = ps.seq(.{
 
     pub const left_arrow = ps.discardSeq(.{ ps.str("<-"), spacing });
     pub const ident_arrow = ident_str.discardR(left_arrow);
-    pub const def = ps.seq(.{ ident_arrow, expression.until(ident_arrow) });
+    pub const def = ps.seq(.{
+        ident_arrow,
+        expression.discardR(ps.eos).until(ident_arrow),
+    });
     pub const grammar = spacing
         .discardL(def.many1())
         .discardR(ps.eos)

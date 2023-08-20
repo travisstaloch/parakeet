@@ -5,32 +5,35 @@ const Expr = pk.peg.Expr;
 const builtin = @import("builtin");
 const is_debug_mode = builtin.mode == .Debug;
 
-pub const Result = struct {
-    input: pk.Input,
-    output: Output,
+pub const Ok = [2]u32;
 
-    const Output = union(enum) {
-        err: pk.ParseError,
-        // TODO perhaps change ok back to []const u8 now that run()
-        // 'returns' by out pointer
-        /// start and end indices for input.s
-        ok: Ok,
+pub const CaptureInfo = struct {
+    rule_name: []const u8,
+    text_ptr: [*]const u8,
+    text_span: Ok,
+    id: Id,
+
+    pub const Id = packed struct {
+        rule: u32,
+        cap: u32,
+        pub fn init(rule: u32, cap: u32) Id {
+            return .{
+                .rule = rule,
+                .cap = cap,
+            };
+        }
+        pub fn asInt(ids: Id) usize {
+            return @bitCast(ids);
+        }
+        pub fn int(rule: u32, cap: u32) usize {
+            return @bitCast(init(rule, cap));
+        }
     };
 
-    pub const Ok = [2]u32;
-
-    pub fn err(i: pk.Input) Result {
-        return .{ .input = i, .output = .{ .err = error.ParseFailure } };
-    }
-    pub fn errWith(i: pk.Input, e: pk.ParseError) Result {
-        return .{ .input = i, .output = .{ .err = e } };
-    }
-    pub fn ok(i: pk.Input, s: [2]u32) Result {
-        return .{ .input = i, .output = .{ .ok = s } };
+    pub fn text(self: CaptureInfo) []const u8 {
+        return self.text_ptr[self.text_span[0]..self.text_span[1]];
     }
 };
-
-pub const MemoTable = std.AutoHashMapUnmanaged(Result.Ok, Result);
 
 pub fn ParseContext(comptime CaptureHandler: type) type {
     return struct {
@@ -48,11 +51,40 @@ pub fn ParseContext(comptime CaptureHandler: type) type {
 
         pub const Ctx = @This();
         pub const C = CaptureHandler;
+        pub const MemoTable = std.AutoHashMapUnmanaged(Ok, Result);
         pub const Options = struct {
             allocator: mem.Allocator = pk.failing_allocator,
             mode: Pattern.OptimizeMode = .optimized,
             capture_handler: if (C == void) void else *C =
                 if (C == void) {} else undefined,
+        };
+
+        pub const Error = pk.ParseError || if (CaptureHandler == void)
+            error{}
+        else
+            pk.RetErrorSet(CaptureHandler.onCapture);
+
+        pub const Result = struct {
+            input: pk.Input,
+            output: Output,
+
+            const Output = union(enum) {
+                err: Error,
+                // TODO perhaps change ok back to []const u8 now that run()
+                // 'returns' by out pointer
+                /// start and end indices for input.s
+                ok: Ok,
+            };
+
+            pub fn err(i: pk.Input) Result {
+                return .{ .input = i, .output = .{ .err = error.ParseFailure } };
+            }
+            pub fn errWith(i: pk.Input, e: Error) Result {
+                return .{ .input = i, .output = .{ .err = e } };
+            }
+            pub fn ok(i: pk.Input, s: [2]u32) Result {
+                return .{ .input = i, .output = .{ .ok = s } };
+            }
         };
 
         /// initializes 'rules' and 'allocator' fields. 'input' and 'rule_id'
@@ -72,7 +104,7 @@ pub fn ParseContext(comptime CaptureHandler: type) type {
             };
         }
 
-        pub fn onCapture(ctx: *Ctx, capid: u32, ok: Result.Ok) !void {
+        pub fn onCapture(ctx: *Ctx, rule_name: []const u8, ruleid: u32, capid: u32, ok: Ok) !void {
             const info = @typeInfo(CaptureHandler);
             if (info == .Struct and @hasDecl(CaptureHandler, "onCapture")) {
                 // verify capture_handler.onCapture first param is a self pointer
@@ -85,9 +117,13 @@ pub fn ParseContext(comptime CaptureHandler: type) type {
                         @typeName(Param1) ++ "'");
                 std.debug.assert(ok[0] <= ok[1]);
                 std.debug.assert(ok[1] <= ctx.input.len);
-                const s = ctx.input.s[ok[0]..ok[1]];
                 // std.debug.print("ok={},{} s={}\n", .{ ok[0], ok[1], s });
-                try ctx.capture_handler.onCapture(capid, s);
+                try ctx.capture_handler.onCapture(.{
+                    .rule_name = rule_name,
+                    .id = CaptureInfo.Id.init(ruleid, capid),
+                    .text_ptr = ctx.input.s,
+                    .text_span = ok,
+                });
             }
         }
     };
@@ -98,12 +134,12 @@ pub fn parse(
     ctx: *Ctx,
     start_rule_id: u32,
     input: []const u8,
-) Result {
+) Ctx.Result {
     ctx.input = pk.input(input);
     ctx.rule_id = start_rule_id;
     ctx.memo.clearRetainingCapacity();
 
-    var result: Result = undefined;
+    var result: Ctx.Result = undefined;
     const pat = ctx.rules[ctx.rule_id].pattern;
     pat.run(Ctx, ctx, &result);
 
@@ -538,8 +574,9 @@ pub const Pattern = union(enum) {
         pat: Pattern,
         comptime Ctx: type,
         ctx: *Ctx,
-        res: *Result,
+        res: *Ctx.Result,
     ) void {
+        const Result = Ctx.Result;
         const in = ctx.input;
         const debugthis = false;
         if (debugthis) {
@@ -676,9 +713,16 @@ pub const Pattern = union(enum) {
                 gop.value_ptr.* = res.*;
             },
             .cap => |patid| {
+                // TODO add rule_id to .cap, use it here instead of ctx.rule_id
+                // which doesn't always have the parent rule_id
                 patid.pat.run(Ctx, ctx, res);
                 if (res.output == .ok) {
-                    ctx.onCapture(patid.id, res.output.ok) catch |e| {
+                    ctx.onCapture(
+                        ctx.rules[ctx.rule_id].rule_name,
+                        ctx.rule_id,
+                        patid.id,
+                        res.output.ok,
+                    ) catch |e| {
                         res.* = Result.errWith(in, e);
                     };
                 }
