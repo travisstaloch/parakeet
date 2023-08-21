@@ -685,7 +685,7 @@ pub fn discardL(comptime p1: anytype, comptime p2: anytype) TypeOf(p2) {
             fn run(_: P, i: Input, opts: Options) P.Result {
                 const r1 = p1.run(i, opts);
                 if (r1.output == .err)
-                    return P.errWith(r1.input, r1.output.err, r1.resource);
+                    return P.errWith(r1.input, error.ParseFailure, r1.resource);
                 // std.debug.print("i={} r1={}\n", .{ i, r1 });
                 const r2 = p2.run(r1.input, opts);
                 // std.debug.print("r2={}\n", .{r2});
@@ -990,7 +990,8 @@ pub fn peekString(comptime count: usize) StringParser {
     };
 }
 
-/// a parser that doesn't advance input and returns output of running 'p'
+/// positive lookahead. a parser that doesn't advance input and returns output
+/// of running 'p'
 pub fn peek(comptime p: anytype) TypeOf(p) {
     const P = TypeOf(p);
     return .{
@@ -1005,6 +1006,24 @@ pub fn peek(comptime p: anytype) TypeOf(p) {
         }.run,
         .fail_handler = p.fail_handler,
         .type = .peek,
+    };
+}
+
+/// negative lookahead. never consumes any input and inverts the result of 'p'.
+pub fn peekNot(comptime p: anytype) VoidParser {
+    const P = VoidParser;
+    return .{
+        .runFn = struct {
+            fn run(_: P, i: P.Input, opts: Options) P.Result {
+                const r = p.run(i, opts);
+                return if (r.output == .err)
+                    P.ok(i, {}, r.resource)
+                else
+                    P.err(i, r.resource);
+            }
+        }.run,
+        .fail_handler = default_fail_handler,
+        .type = .peekNot,
     };
 }
 
@@ -1271,6 +1290,8 @@ pub fn FoldWhile(comptime p: anytype, comptime T: type) type {
     return Parser(TypeOf(p).Input, T);
 }
 
+/// a parser that loops while 'p' succeeds, passing a 'state' and the parse
+/// result to 'f'. 'state' begins with the value 'init_state'.
 pub fn foldWhile(
     comptime init_state: anytype,
     comptime p: anytype,
@@ -1297,4 +1318,9 @@ pub fn foldWhile(
         .fail_handler = default_fail_handler,
         .type = .foldWhile,
     };
+}
+
+/// a parser that only accepts digits of the given 'base' (aka radix)
+pub fn digits(comptime base: u8) StringParser {
+    return takeWhile1(charRange('0', '0' + base - 1)).withType(.digits);
 }

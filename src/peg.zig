@@ -56,6 +56,8 @@ pub const Expr = union(enum) {
 
     pub const Def = struct { []const u8, Expr };
     pub const Tag = std.meta.Tag(Expr);
+    pub const ExprId = struct { expr: *const Expr, id: u32 };
+
     pub const Class = struct {
         /// if more than 1/2 of the 256 bits are set the Class is
         /// implicitly 'negated'. this removes the need for a 'negated' bool field
@@ -91,7 +93,6 @@ pub const Expr = union(enum) {
             return .{ .bitset = if (negated) bitset.complement() else bitset };
         }
     };
-    pub const ExprId = struct { expr: *const Expr, id: u32 };
 
     pub fn deinit(e: Expr, allocator: mem.Allocator) void {
         switch (e) {
@@ -128,6 +129,7 @@ pub const Expr = union(enum) {
     }
     pub const PlusRes = struct { Expr, []const Expr };
     pub fn initPlusRes(e: Expr, es: []const Expr) PlusRes {
+        // std.debug.print("{s}={} es={any}\n", .{ @tagName(e), e, es });
         return .{ e, es };
     }
 
@@ -158,6 +160,7 @@ pub const Expr = union(enum) {
     pub fn class(bitset: Expr.Class.Set) Expr {
         return .{ .class = .{ .bitset = bitset } };
     }
+
     var memoid: u32 = 0;
     pub fn memo(e: Expr, mallocator: ?mem.Allocator) !Expr {
         const allocator = mallocator orelse return error.AllocatorRequired;
@@ -166,20 +169,16 @@ pub const Expr = union(enum) {
         defer memoid += 1;
         return .{ .memo = .{ .expr = o, .id = memoid } };
     }
+
     var capid: u32 = 0;
-    pub fn capture(e: Expr, capid_str: []const u8, mallocator: ?mem.Allocator) !Expr {
+    pub fn capture(e: Expr, mallocator: ?mem.Allocator) !Expr {
         const allocator = mallocator orelse return error.AllocatorRequired;
         const o = try allocator.create(Expr);
         o.* = e;
-        const has_capid_str = capid_str.len != 0;
-        defer {
-            if (!has_capid_str) capid += 1;
-        }
-        return .{ .cap = .{ .expr = o, .id = if (has_capid_str)
-            try std.fmt.parseInt(u32, capid_str, 10)
-        else
-            capid } };
+        defer capid += 1;
+        return .{ .cap = .{ .expr = o, .id = capid } };
     }
+
     pub fn group(e: Expr, mallocator: ?mem.Allocator) !Expr {
         // if its a single node, just return it. only allow seq and alt nodes in group
         switch (e) {
@@ -402,7 +401,9 @@ pub const Expr = union(enum) {
                     try d[1].formatImpl(writer, depth);
                 }
             },
-            .empty => {},
+            .empty => {
+                // _ = try writer.write("__empty_string");
+            },
         }
     }
 
@@ -686,14 +687,20 @@ pub const parsers = struct {
     pub const spacing = ps.takeWhile(ps.choice(.{ space, comment }), .{});
 
     // zig fmt: off
-pub const ident_str = ps.seq(.{
-        ps.satisfy(std.ascii.isAlphabetic), 
-        ps.choice(.{ ps.satisfy(std.ascii.isAlphanumeric), ps.char('_') })
+    pub const ident_str = ps.seq(.{
+        ps.choice(.{
+            ps.satisfy(std.ascii.isAlphabetic),
+            ps.char('_'),
+        }),
+        ps.choice(.{
+            ps.satisfy(std.ascii.isAlphanumeric), 
+            ps.char('_') 
+        })
             .takeWhile(.{}) 
     })
-    .asStr()
-    .discardR(spacing);
-// zig fmt: on
+        .asStr()
+        .discardR(spacing);
+    // zig fmt: on
 
     pub const ident = ident_str.map(Expr.initFn(.ident));
 
@@ -731,10 +738,13 @@ pub const ident_str = ps.seq(.{
         );
     }
 
+    // Literal <-
+    //      ['] (!['] Char )* ['] Spacing
+    //    / ["] (!["] Char )* ["] Spacing
     fn litStr(comptime c: u8, tag: Expr.Tag) ExprP(error{}) {
         const cp = ps.char(c);
         return cp
-            .discardL(ps.manyUntil(chr_c, cp))
+            .discardL(ps.many1(ps.seq(.{ ps.peekNot(cp), chr_c })))
             .discardR(cp)
             .discardR(spacing)
             .map(litWithTag(tag));
@@ -796,29 +806,27 @@ pub const ident_str = ps.seq(.{
         .discardR(spacing);
     // zig fmt: on
 
+    /// '{{' expression '}}'
     pub const memo = ps.seqMapAlloc(.{
         ps.discardSeq(.{ ps.str("{{"), spacing }),
-        ps.ref(exprRef),
+        ps.ref(exprRef).discardR(spacing),
         ps.discardSeq(.{ ps.str("}}"), spacing }),
     }, Expr.memo);
+
+    /// '{' expression '}'
     pub const capture = ps.seqMapAlloc(.{
         ps.discardSeq(.{ ps.str("{"), spacing }),
-        ps.ref(exprRef),
-        ps.discardSeq(.{ ps.char('}'), spacing }),
-        ps.option(ps.seq(.{
-            ps.discardSeq(.{ ps.char(':'), spacing }),
-            ps.intToken(u16, .{ .max = std.math.log10(std.math.maxInt(u16)) }, 10),
-            spacing.discard(),
-        })),
+        ps.ref(exprRef).discardR(spacing),
+        ps.discardSeq(.{ ps.str("}"), spacing }),
     }, Expr.capture);
 
     pub const primary = ps.choice(.{
-        ident,
         group,
         literal,
         class,
         memo,
         capture,
+        ps.seq(.{ ident, ps.peekNot(left_arrow) }),
         dot,
     });
 
@@ -875,15 +883,25 @@ pub const ident_str = ps.seq(.{
     /// Sequence <- Prefix (Prefix)* /
     pub const sequence = ps.choice(.{
         ps.seqMap(.{ prefix, ps.many(prefix, .{}) }, Expr.initPlusRes),
-        ps.discardSeq(.{ spacing, ps.eos })
-            .discardL(ps.constant(pk.Input, @as(Expr.PlusRes, .{ Expr.empty, &.{} }))),
+        // the following allows for lone trailing '/' which translates to
+        // 'or empty string'.  this is when prefix fails and eos or end of def
+        ps.choice(.{
+            ps.discardSeq(.{ spacing, ps.eos }),
+            ps.peek(ps.seq(.{ ident_str, left_arrow })).discard(),
+        })
+            .discardL(
+            ps.constant(pk.Input, Expr.PlusRes{ .empty, &.{} }),
+        ),
     })
         .mapAlloc(Expr.initFnAlloc(.seq));
 
     /// Expression <- Sequence (SLASH Sequence)*
     pub const expression = ps.seqMap(.{
         sequence,
-        ps.char('/').discardR(spacing).discardL(sequence).many(.{}),
+        ps.char('/')
+            .discardR(spacing)
+            .discardL(sequence)
+            .many(.{}),
     }, Expr.initPlusRes)
         .mapAlloc(Expr.initFnAlloc(.alt));
 
@@ -893,10 +911,7 @@ pub const ident_str = ps.seq(.{
 
     pub const left_arrow = ps.discardSeq(.{ ps.str("<-"), spacing });
     pub const ident_arrow = ident_str.discardR(left_arrow);
-    pub const def = ps.seq(.{
-        ident_arrow,
-        expression.discardR(ps.eos).until(ident_arrow),
-    });
+    pub const def = ps.seq(.{ ident_arrow, expression });
     pub const grammar = spacing
         .discardL(def.many1())
         .discardR(ps.eos)

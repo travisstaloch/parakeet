@@ -30,7 +30,7 @@ fn checkSame(p: anytype, in: []const u8) !void {
 }
 
 test "peg expression" {
-    try testing.expectError(error.ParseFailure, checkSame(pegps.ident, "_"));
+    try testing.expectError(error.ParseFailure, checkSame(pegps.ident, "1"));
     try testing.expectError(error.ParseFailure, checkSame(pegps.ident, ""));
     try checkSame(pegps.expression, "id1");
     try checkSame(pegps.expression, "id1?");
@@ -60,6 +60,10 @@ test "peg expression" {
     try checkSame(pegps.expression, "{{ a }}");
     try checkSame(pegps.expression, "{{ a }}*");
     try check(pegps.expression, "( {{ a }} )*", "{{ a }}*");
+    try checkSame(pegps.expression,
+        \\a b
+        \\    / 
+    );
 }
 
 test "peg string literal" {
@@ -159,11 +163,7 @@ test "peg grammar" {
         \\Expr <- Factor ( [+\-] Factor )*
         \\Factor <- Term ( [*/] Term )*
     );
-    try check(pegps.grammar,
-        \\Sequence <-
-        \\      Prefix ( Prefix )*
-        \\    / 
-    ,
+    try check(pegps.grammar, "Sequence <- Prefix ( Prefix )* /",
         \\Sequence <-
         \\      Prefix Prefix*
         \\    / 
@@ -177,6 +177,11 @@ test "peg grammar" {
         \\      mb_utf8_literal
         \\    / char_escape
         \\    / ascii_char_not_nl_slash_squote
+    );
+    try check(pegps.grammar, "expr <- term expr2 /",
+        \\expr <-
+        \\      term expr2
+        \\    / 
     );
 }
 
