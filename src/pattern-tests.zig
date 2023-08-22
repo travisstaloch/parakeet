@@ -208,7 +208,7 @@ test "json parser with captures" {
     const input =
         \\doc           <- JSON !.
         \\JSON          <- S_ (Number:0 / Object / Array / String / True / False / Null) S_
-        \\Object        <- '{':0 (String: ':' JSON (',' String ':' JSON)* / S_) '}':1
+        \\Object        <- '{' (String:0 ':' JSON (',' String ':' JSON)* / S_) '}':1
         \\Array         <- '[' (JSON (',' JSON)* / S_) ']'
         \\StringBody    <- Escape? ((!["\\\00-\37] .)+ Escape*)*
         \\String        <- S_ '"' StringBody '"' S_
@@ -245,7 +245,7 @@ test "json parser with captures" {
             const Id = pk.pattern.CaptureInfo.Id;
 
             switch (cap.id.asInt()) {
-                Id.int(5, 4) => { // String - json key
+                Id.int(2, 0) => { // String - json key
                     const text = cap.text();
                     if (text.len < 2) return error.ParseFailure;
                     const Field = enum { a, b };
@@ -258,11 +258,11 @@ test "json parser with captures" {
                         .b => self.state = .b,
                     }
                 },
-                Id.int(8, 0) => { // Number
+                Id.int(1, 0) => { // Number
                     if (self.state != .b) return error.ParseFailure;
                     self.a.b = try std.fmt.parseInt(u8, cap.text(), 10);
                 },
-                Id.int(8, 1) => {
+                Id.int(2, 1) => { // '}'
                     switch (self.state) {
                         .b => self.state = .b_end,
                         .b_end => {

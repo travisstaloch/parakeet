@@ -104,7 +104,7 @@ pub fn ParseContext(comptime CaptureHandler: type) type {
             };
         }
 
-        pub fn onCapture(ctx: *Ctx, rule_name: []const u8, ruleid: u32, capid: u32, ok: Ok) !void {
+        pub fn onCapture(ctx: *Ctx, rule_name: []const u8, id: CaptureInfo.Id, ok: Ok) !void {
             const info = @typeInfo(CaptureHandler);
             if (info == .Struct and @hasDecl(CaptureHandler, "onCapture")) {
                 // verify capture_handler.onCapture first param is a self pointer
@@ -120,7 +120,7 @@ pub fn ParseContext(comptime CaptureHandler: type) type {
                 // std.debug.print("ok={},{} s={}\n", .{ ok[0], ok[1], s });
                 try ctx.capture_handler.onCapture(.{
                     .rule_name = rule_name,
-                    .id = CaptureInfo.Id.init(ruleid, capid),
+                    .id = id,
                     .text_ptr = ctx.input.s,
                     .text_span = ok,
                 });
@@ -181,8 +181,8 @@ pub const Pattern = union(enum) {
     opt: *Pattern,
     not: *Pattern,
     amp: *Pattern,
-    memo: PatternId,
-    cap: PatternId,
+    memo: Memo,
+    cap: Capture,
     nonterm: u32,
     dot,
     eos,
@@ -192,7 +192,8 @@ pub const Pattern = union(enum) {
         std.debug.assert(24 == @sizeOf(Pattern));
     }
     pub const Tag = std.meta.Tag(Pattern);
-    pub const PatternId = struct { pat: *Pattern, id: u32 };
+    pub const Memo = struct { pat: *Pattern, id: u32 };
+    pub const Capture = struct { pat: *Pattern, id: CaptureInfo.Id };
 
     /// if all choices are charsets or single chars, return a class of the union
     fn combineAlt(pats: []const Pattern) ?Expr.Class.Set {
@@ -240,7 +241,8 @@ pub const Pattern = union(enum) {
             .not,
             .amp,
             => |ip, tag| eql(ip.*, @field(other, @tagName(tag)).*),
-            .memo, .cap => |m| m.id == other.memo.id and eql(m.pat.*, other.memo.pat.*),
+            .memo => |m| m.id == other.memo.id and eql(m.pat.*, other.memo.pat.*),
+            .cap => |m| m.id.cap == other.cap.id.cap and eql(m.pat.*, other.cap.pat.*),
             .nonterm => |id| id == other.nonterm,
             .dot,
             .eos,
@@ -350,14 +352,14 @@ pub const Pattern = union(enum) {
             .class => |klass| return .{ .class = klass },
             // inline nonterminals up to 2 levels deep. 2 levels was an arbitrary decision
             // TODO consider dealying inlining to a later pass
-            .nonterm => |id| return if (depth < 2)
-                try optimizeImpl(gexpr, try fromExpr(arena, gexpr.grammar[id][1], map), map, depth + 1, arena, mode)
-            else
-                .{ .nonterm = id },
+            .nonterm => |id| return if (depth < 2) blk: {
+                const p = try fromExpr(arena, gexpr.grammar[id][1], id, map);
+                break :blk try optimizeImpl(gexpr, p, map, depth + 1, arena, mode);
+            } else .{ .nonterm = id },
             .dot => return .dot,
             .empty => return .empty,
             .eos => return .eos,
-            .memo, .cap => |m| {
+            inline .memo, .cap => |m| {
                 m.pat.* = try optimizeImpl(gexpr, m.pat.*, map, depth, arena, mode);
                 return pat;
             },
@@ -370,6 +372,7 @@ pub const Pattern = union(enum) {
     pub fn fromExpr(
         arena: mem.Allocator,
         e: Expr,
+        rule_id: u32,
         map: Expr.NonTerminalIdMap,
     ) !Pattern {
         return switch (e) {
@@ -386,47 +389,50 @@ pub const Pattern = union(enum) {
             .dot => .dot,
             inline .amp, .opt => |ie, tag| blk: {
                 const ptr = try arena.create(Pattern);
-                ptr.* = try fromExpr(arena, ie.*, map);
+                ptr.* = try fromExpr(arena, ie.*, rule_id, map);
                 break :blk @unionInit(Pattern, @tagName(tag), ptr);
             },
             .not => |ie| if (ie.* == .dot) .eos else blk: {
                 const ptr = try arena.create(Pattern);
-                ptr.* = try fromExpr(arena, ie.*, map);
+                ptr.* = try fromExpr(arena, ie.*, rule_id, map);
                 break :blk .{ .not = ptr };
             },
             .star => |ie| blk: {
                 const ptr = try arena.create(Pattern);
-                ptr.* = try fromExpr(arena, ie.*, map);
+                ptr.* = try fromExpr(arena, ie.*, rule_id, map);
                 break :blk .{ .many = ptr };
             },
             .plus => |ie| blk: {
                 const ptr = try arena.create(Pattern);
-                const pat = try fromExpr(arena, ie.*, map);
+                const pat = try fromExpr(arena, ie.*, rule_id, map);
                 ptr.* = pat;
                 const items = try arena.alloc(Pattern, 2);
                 items[0] = pat;
                 items[1] = .{ .many = ptr };
                 break :blk .{ .seq = items };
             },
-            .group => |ie| try fromExpr(arena, ie.*, map),
+            .group => |ie| try fromExpr(arena, ie.*, rule_id, map),
             .memo => |m| blk: {
                 const ptr = try arena.create(Pattern);
-                ptr.* = try fromExpr(arena, m.expr.*, map);
+                ptr.* = try fromExpr(arena, m.expr.*, rule_id, map);
                 break :blk .{ .memo = .{ .pat = ptr, .id = m.id } };
             },
             .cap => |m| blk: {
                 const ptr = try arena.create(Pattern);
-                ptr.* = try fromExpr(arena, m.expr.*, map);
-                break :blk .{ .cap = .{ .pat = ptr, .id = m.id } };
+                ptr.* = try fromExpr(arena, m.expr.*, rule_id, map);
+                break :blk .{ .cap = .{ .pat = ptr, .id = .{
+                    .rule = rule_id,
+                    .cap = m.id,
+                } } };
             },
             .alt => |es| blk: {
                 const ps = try arena.alloc(Pattern, es.len);
-                for (0..es.len) |i| ps[i] = try fromExpr(arena, es[i], map);
+                for (0..es.len) |i| ps[i] = try fromExpr(arena, es[i], rule_id, map);
                 break :blk .{ .alt = ps };
             },
             .seq => |es| blk: {
                 const ps = try arena.alloc(Pattern, es.len);
-                for (0..es.len) |i| ps[i] = try fromExpr(arena, es[i], map);
+                for (0..es.len) |i| ps[i] = try fromExpr(arena, es[i], rule_id, map);
                 break :blk .{ .seq = ps };
             },
             .empty => .empty,
@@ -459,7 +465,7 @@ pub const Pattern = union(enum) {
         for (0..gexpr.grammar.len) |i| {
             rules[i].rule_id = @truncate(i);
             rules[i].rule_name = gexpr.grammar[i][0];
-            const pat = try fromExpr(arena, gexpr.grammar[i][1], map);
+            const pat = try fromExpr(arena, gexpr.grammar[i][1], rules[i].rule_id, map);
             rules[i].pattern = if (mode == .optimized)
                 try optimizeImpl(gexpr, pat, map, 0, arena, mode)
             else
@@ -494,7 +500,7 @@ pub const Pattern = union(enum) {
             } else .nullable,
             .many, .opt, .not, .amp => .nullable,
             .eos, .empty => .nullable,
-            .memo, .cap => |m| nullability(m.pat.*, rules, start_rule_id),
+            inline .memo, .cap => |m| nullability(m.pat.*, rules, start_rule_id),
             .nonterm => |id| if (id == start_rule_id)
                 .unknown
             else
@@ -556,7 +562,7 @@ pub const Pattern = union(enum) {
                     first_set.bitset = c.bitset;
                 }
             },
-            .memo, .cap => |m| calcFirstSet(m.pat.*, rules, first_set, start_rule_id),
+            inline .memo, .cap => |m| calcFirstSet(m.pat.*, rules, first_set, start_rule_id),
             .nonterm => |id| {
                 if (id != start_rule_id) {
                     var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
@@ -715,15 +721,12 @@ pub const Pattern = union(enum) {
                 m.pat.run(Ctx, ctx, res);
                 gop.value_ptr.* = res.*;
             },
-            .cap => |patid| {
-                // TODO add rule_id to .cap, use it here instead of ctx.rule_id
-                // which doesn't always have the parent rule_id
-                patid.pat.run(Ctx, ctx, res);
+            .cap => |cap| {
+                cap.pat.run(Ctx, ctx, res);
                 if (res.output == .ok) {
                     ctx.onCapture(
                         ctx.rules[ctx.rule_id].rule_name,
-                        ctx.rule_id,
-                        patid.id,
+                        cap.id,
                         res.output.ok,
                     ) catch |e| {
                         res.* = Result.errWith(in, e);
