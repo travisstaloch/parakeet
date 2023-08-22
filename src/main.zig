@@ -31,12 +31,13 @@ pub fn main() !void {
             error.FileNotFound => continue,
             else => return e,
         };
-        const input: [:0]const u8 = try file.readToEndAllocOptions(alloc, std.math.maxInt(u32), null, 1, 0);
+        const input: [:0]const u8 =
+            try file.readToEndAllocOptions(alloc, std.math.maxInt(u32), null, 1, 0);
         defer file.close();
         try files.append(.{ arg, input });
     }
     var errcount: usize = 0;
-    var bytes_processed: usize = 0;
+    var bytes_processed: f64 = 0;
     const Ctx = pk.pattern.ParseContext(void);
     var timer = try std.time.Timer.start();
 
@@ -53,12 +54,21 @@ pub fn main() !void {
             file[1],
         );
         if (r.output == .err) {
-            try stdout.print("parse {s} {s} input={}\n", .{ @tagName(r.output), file[0], r.input });
+            try stdout.print(
+                "parse {s} {s} input={}\n",
+                .{ @tagName(r.output), file[0], r.input },
+            );
             errcount += 1;
         }
-        bytes_processed += r.input.index;
+        bytes_processed += @floatFromInt(r.input.index);
     }
     const ns = timer.read();
+    var lines: f64 = 0;
+    for (files.items) |file| {
+        for (file[1]) |c| {
+            if (c == '\n') lines += 1;
+        }
+    }
     const dashes = "-" ** 40;
     std.debug.print("{s}\n", .{dashes});
     std.debug.print("PARSE SUMMARY\n", .{});
@@ -67,17 +77,27 @@ pub fn main() !void {
     const fmt1 = "{s: <12}";
     std.debug.print(fmt1 ++ " {d: >9.1}% - {}/{}/{} ok/total/err\n", .{
         "files parsed",
-        @as(f64, @floatFromInt(successes)) / @as(f64, @floatFromInt(files.items.len)) * 100,
+        @as(f64, @floatFromInt(successes)) /
+            @as(f64, @floatFromInt(files.items.len)) * 100,
         successes,
         files.items.len,
         errcount,
     });
-    std.debug.print(fmt1 ++ " {d: >10.3} - {} bytes\n", .{ "size", std.fmt.fmtIntSizeBin(bytes_processed), bytes_processed });
+    std.debug.print(fmt1 ++ " {d: >10.3} - {d:.3}K lines\n", .{
+        "size",
+        std.fmt.fmtIntSizeBin(@intFromFloat(bytes_processed)),
+        lines / 1024,
+    });
     std.debug.print(fmt1 ++ " {: >10}\n", .{ "time", std.fmt.fmtDuration(ns) });
-    const gb = (@as(f64, @floatFromInt(bytes_processed)) / (1024 * 1024 * 1024));
-    const mb = (@as(f64, @floatFromInt(bytes_processed)) / (1024 * 1024));
+    const gb = (bytes_processed / (1024 * 1024 * 1024));
+    const mb = (bytes_processed / (1024 * 1024));
     const seconds = @as(f64, @floatFromInt(ns)) / std.time.ns_per_s;
-    std.debug.print(fmt1 ++ "{d: >2.3} GiB/s - {d:.3} MiB/s\n", .{ "speed", gb / seconds, mb / seconds });
+    std.debug.print(fmt1 ++ "{d: >2.3} GiB/s - {d:.3} MiB/s - {d:.3}K lines/s\n", .{
+        "speed",
+        gb / seconds,
+        mb / seconds,
+        lines / 1024 / seconds,
+    });
     std.debug.print("{s}\n", .{dashes});
     if (errcount > 0) std.os.exit(1);
 }
