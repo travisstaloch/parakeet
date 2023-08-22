@@ -164,10 +164,10 @@ pub const Expr = union(enum) {
     var memoid: u32 = 0;
     pub fn memo(e: Expr, mallocator: ?mem.Allocator) !Expr {
         const allocator = mallocator orelse return error.AllocatorRequired;
-        const o = try allocator.create(Expr);
-        o.* = e;
+        const ie = try allocator.create(Expr);
+        ie.* = e;
         defer memoid += 1;
-        return .{ .memo = .{ .expr = o, .id = memoid } };
+        return .{ .memo = .{ .expr = ie, .id = memoid } };
     }
 
     pub fn group(e: Expr, mallocator: ?mem.Allocator) !Expr {
@@ -177,9 +177,9 @@ pub const Expr = union(enum) {
             else => return e,
         }
         const allocator = mallocator orelse return error.AllocatorRequired;
-        const o = try allocator.create(Expr);
-        o.* = e;
-        return .{ .group = o };
+        const ie = try allocator.create(Expr);
+        ie.* = e;
+        return .{ .group = ie };
     }
 
     pub fn escape(c: u8) ?u8 {
@@ -684,7 +684,7 @@ pub const parsers = struct {
         }),
         ps.choice(.{
             ps.satisfy(std.ascii.isAlphanumeric), 
-            ps.char('_') 
+            ps.char('_'),
         })
             .takeWhile(.{}) 
     })
@@ -821,42 +821,53 @@ pub const parsers = struct {
     }
 
     var capid: u32 = 0;
-    fn suffixFn(e: Expr, mt: ?Expr.Tag, _cap_str: ?[]const u8, mallocator: ?mem.Allocator) !Expr {
-        const allocator = mallocator orelse return error.AllocatorRequired;
-        const is_cap = _cap_str != null;
-        const cap_str = _cap_str orelse "";
-        // std.debug.print("is_cap={} cap_str='{s}'\n", .{ is_cap, cap_str });
-        defer capid += @intFromBool(is_cap and cap_str.len != 0);
-        return if (!is_cap)
-            switch (mt orelse return e) {
-                inline .opt, .star, .plus => |tag| blk: {
-                    const o = try allocator.create(Expr);
-                    o.* = e;
-                    break :blk @unionInit(Expr, @tagName(tag), o);
-                },
-                else => error.ParseFailure,
-            }
-        else if (mt) |t| switch (t) {
+    fn suffixWithCapture(
+        e: Expr,
+        mtag: ?Expr.Tag,
+        cap_str: []const u8,
+        allocator: mem.Allocator,
+    ) !Expr {
+        const cap_id = if (cap_str.len == 0)
+            capid
+        else
+            try std.fmt.parseInt(u32, cap_str, 10);
+        defer capid += @intFromBool(cap_str.len != 0);
+
+        return if (mtag) |t| switch (t) {
             inline .opt, .star, .plus => |tag| blk: {
-                const cap_id = if (cap_str.len == 0)
-                    capid
-                else
-                    try std.fmt.parseInt(u32, cap_str, 10);
-                const o = try allocator.create(Expr);
-                o.* = e;
-                const o2 = try allocator.create(Expr);
-                o2.* = @unionInit(Expr, @tagName(tag), o);
-                break :blk .{ .cap = .{ .expr = o2, .id = cap_id } };
+                const ie = try allocator.create(Expr);
+                ie.* = e;
+                const ie2 = try allocator.create(Expr);
+                ie2.* = @unionInit(Expr, @tagName(tag), ie);
+                break :blk .{ .cap = .{ .expr = ie2, .id = cap_id } };
             },
             else => error.ParseFailure,
         } else blk: {
-            const cap_id = if (cap_str.len == 0)
-                capid
-            else
-                try std.fmt.parseInt(u32, cap_str, 10);
-            const o = try allocator.create(Expr);
-            o.* = e;
-            break :blk .{ .cap = .{ .expr = o, .id = cap_id } };
+            const ie = try allocator.create(Expr);
+            ie.* = e;
+            break :blk .{ .cap = .{ .expr = ie, .id = cap_id } };
+        };
+    }
+
+    /// when mtag != null, there was a trailing modifier such as '*'
+    /// when mcap_str != null, there was a trailing ':'
+    fn suffixFn(
+        e: Expr,
+        mtag: ?Expr.Tag,
+        mcap_str: ?[]const u8,
+        mallocator: ?mem.Allocator,
+    ) !Expr {
+        const allocator = mallocator orelse return error.AllocatorRequired;
+        // std.debug.print("is_cap={} cap_str='{s}'\n", .{ mcap_str != null, cap_str });
+        return if (mcap_str) |cap_str|
+            suffixWithCapture(e, mtag, cap_str, allocator)
+        else switch (mtag orelse return e) {
+            inline .opt, .star, .plus => |tag| blk: {
+                const ie = try allocator.create(Expr);
+                ie.* = e;
+                break :blk @unionInit(Expr, @tagName(tag), ie);
+            },
+            else => error.ParseFailure,
         };
     }
 
@@ -880,9 +891,9 @@ pub const parsers = struct {
         const allocator = mallocator orelse return error.AllocatorRequired;
         return switch (t) {
             inline .amp, .not => |tag| blk: {
-                const o = try allocator.create(Expr);
-                o.* = e;
-                break :blk @unionInit(Expr, @tagName(tag), o);
+                const ie = try allocator.create(Expr);
+                ie.* = e;
+                break :blk @unionInit(Expr, @tagName(tag), ie);
             },
             else => error.ParseFailure,
         };
