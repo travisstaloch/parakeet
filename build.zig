@@ -19,7 +19,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
-        // unit_tests.filter = "";
+        const test_filter = b.option([]const u8, "test-filter", "");
+        unit_tests.filter = test_filter;
         unit_tests.addModule("parakeet", parakeet_mod);
         const run_unit_tests = b.addRunArtifact(unit_tests);
         run_unit_tests.has_side_effects = true;
