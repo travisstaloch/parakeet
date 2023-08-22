@@ -174,8 +174,8 @@ test "first sets and nullability" {
 test "basic captures" {
     const input =
         \\S   <- foo bar
-        \\foo <- { "foo" } : 0
-        \\bar <- { "bar" }
+        \\foo <- "foo" : 123
+        \\bar <- "bar":
     ;
     var arena = std.heap.ArenaAllocator.init(talloc);
     defer arena.deinit();
@@ -189,13 +189,17 @@ test "basic captures" {
     var handler = CaptureHandler{ .allocator = arena.allocator() };
     const Ctx = pk.pattern.ParseContext(CaptureHandler);
     const g = try pk.peg.parseString(pk.peg.parsers.grammar, input, arena.allocator());
+    try testing.expectEqual(@as(usize, 3), g.grammar.len);
+    try testing.expectEqual(@as(u32, 123), g.grammar[1][1].cap.id);
+    try testing.expect(g.grammar[1][1] == .cap);
+
     var ctx = try Ctx.init(.{
         .allocator = arena.allocator(),
         .capture_handler = &handler,
     }, g);
-
     const r = pk.pattern.parse(Ctx, &ctx, 0, "foobar");
     try testing.expect(r.output == .ok);
+    try testing.expectEqual(@as(usize, 2), handler.captures.items.len);
     try testing.expectEqualStrings("foo", handler.captures.items[0]);
     try testing.expectEqualStrings("bar", handler.captures.items[1]);
 }
@@ -203,8 +207,8 @@ test "basic captures" {
 test "json parser with captures" {
     const input =
         \\doc           <- JSON !.
-        \\JSON          <- S_ ({Number}:0 / Object / Array / String / True / False / Null) S_
-        \\Object        <- {'{'}:0 ({String} ':' JSON (',' String ':' JSON)* / S_) {'}'}:1
+        \\JSON          <- S_ (Number:0 / Object / Array / String / True / False / Null) S_
+        \\Object        <- '{':0 (String: ':' JSON (',' String ':' JSON)* / S_) '}':1
         \\Array         <- '[' (JSON (',' JSON)* / S_) ']'
         \\StringBody    <- Escape? ((!["\\\00-\37] .)+ Escape*)*
         \\String        <- S_ '"' StringBody '"' S_
@@ -233,15 +237,15 @@ test "json parser with captures" {
         pub fn onCapture(self: *@This(), cap: pk.pattern.CaptureInfo) !void {
             // std.debug.print("capture {s}:{}:{}:'{s}' state={s}\n", .{
             //     cap.rule_name,
-            //     cap.rule_id,
-            //     cap.id,
-            //     cap.text,
+            //     cap.id.rule,
+            //     cap.id.cap,
+            //     cap.text(),
             //     @tagName(self.state),
             // });
             const Id = pk.pattern.CaptureInfo.Id;
 
             switch (cap.id.asInt()) {
-                Id.int(5, 2) => { // String - json key
+                Id.int(5, 4) => { // String - json key
                     const text = cap.text();
                     if (text.len < 2) return error.ParseFailure;
                     const Field = enum { a, b };

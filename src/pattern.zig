@@ -460,7 +460,10 @@ pub const Pattern = union(enum) {
             rules[i].rule_id = @truncate(i);
             rules[i].rule_name = gexpr.grammar[i][0];
             const pat = try fromExpr(arena, gexpr.grammar[i][1], map);
-            rules[i].pattern = try optimizeImpl(gexpr, pat, map, 0, arena, mode);
+            rules[i].pattern = if (mode == .optimized)
+                try optimizeImpl(gexpr, pat, map, 0, arena, mode)
+            else
+                pat;
             // debug("optimize() rule={s} nullability={}\n", .{ @tagName(G.rules[i].rule_id), rules[i].nullability });
         }
 

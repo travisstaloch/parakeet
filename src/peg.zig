@@ -170,15 +170,6 @@ pub const Expr = union(enum) {
         return .{ .memo = .{ .expr = o, .id = memoid } };
     }
 
-    var capid: u32 = 0;
-    pub fn capture(e: Expr, mallocator: ?mem.Allocator) !Expr {
-        const allocator = mallocator orelse return error.AllocatorRequired;
-        const o = try allocator.create(Expr);
-        o.* = e;
-        defer capid += 1;
-        return .{ .cap = .{ .expr = o, .id = capid } };
-    }
-
     pub fn group(e: Expr, mallocator: ?mem.Allocator) !Expr {
         // if its a single node, just return it. only allow seq and alt nodes in group
         switch (e) {
@@ -386,9 +377,8 @@ pub const Expr = union(enum) {
                 _ = try writer.write(" }}");
             },
             .cap => |eid| {
-                _ = try writer.write("{ ");
                 try eid.expr.formatImpl(writer, depth + 1);
-                _ = try writer.write(" }");
+                try writer.print(":{}", .{eid.id});
             },
             .grammar => |ds| {
                 for (ds, 0..) |d, i| {
@@ -813,19 +803,11 @@ pub const parsers = struct {
         ps.discardSeq(.{ ps.str("}}"), spacing }),
     }, Expr.memo);
 
-    /// '{' expression '}'
-    pub const capture = ps.seqMapAlloc(.{
-        ps.discardSeq(.{ ps.str("{"), spacing }),
-        ps.ref(exprRef).discardR(spacing),
-        ps.discardSeq(.{ ps.str("}"), spacing }),
-    }, Expr.capture);
-
     pub const primary = ps.choice(.{
         group,
         literal,
         class,
         memo,
-        capture,
         ps.seq(.{ ident, ps.peekNot(left_arrow) }),
         dot,
     });
@@ -838,25 +820,60 @@ pub const parsers = struct {
         }.func;
     }
 
-    fn suffixFn(e: Expr, mt: ?Expr.Tag, mallocator: ?mem.Allocator) !Expr {
-        const t = mt orelse return e;
+    var capid: u32 = 0;
+    fn suffixFn(e: Expr, mt: ?Expr.Tag, _cap_str: ?[]const u8, mallocator: ?mem.Allocator) !Expr {
         const allocator = mallocator orelse return error.AllocatorRequired;
-        return switch (t) {
+        const is_cap = _cap_str != null;
+        const cap_str = _cap_str orelse "";
+        // std.debug.print("is_cap={} cap_str='{s}'\n", .{ is_cap, cap_str });
+        defer capid += @intFromBool(is_cap and cap_str.len != 0);
+        return if (!is_cap)
+            switch (mt orelse return e) {
+                inline .opt, .star, .plus => |tag| blk: {
+                    const o = try allocator.create(Expr);
+                    o.* = e;
+                    break :blk @unionInit(Expr, @tagName(tag), o);
+                },
+                else => error.ParseFailure,
+            }
+        else if (mt) |t| switch (t) {
             inline .opt, .star, .plus => |tag| blk: {
+                const cap_id = if (cap_str.len == 0)
+                    capid
+                else
+                    try std.fmt.parseInt(u32, cap_str, 10);
                 const o = try allocator.create(Expr);
                 o.* = e;
-                break :blk @unionInit(Expr, @tagName(tag), o);
+                const o2 = try allocator.create(Expr);
+                o2.* = @unionInit(Expr, @tagName(tag), o);
+                break :blk .{ .cap = .{ .expr = o2, .id = cap_id } };
             },
             else => error.ParseFailure,
+        } else blk: {
+            const cap_id = if (cap_str.len == 0)
+                capid
+            else
+                try std.fmt.parseInt(u32, cap_str, 10);
+            const o = try allocator.create(Expr);
+            o.* = e;
+            break :blk .{ .cap = .{ .expr = o, .id = cap_id } };
         };
     }
 
-    pub const suffix = ps.seqMapAlloc(.{ primary, ps.choice(.{
-        ps.char('?').discardR(spacing).map(exprTag(.opt)),
-        ps.char('*').discardR(spacing).map(exprTag(.star)),
-        ps.char('+').discardR(spacing).map(exprTag(.plus)),
-        ps.constant(pk.Input, @as(?Expr.Tag, null)),
-    }) }, suffixFn);
+    /// Suffix <- Primary (QUESTION / STAR / PLUS)? (':' digits)?
+    pub const suffix = ps.seqMapAlloc(.{
+        primary,
+        ps.choice(.{
+            ps.char('?').discardR(spacing).map(exprTag(.opt)),
+            ps.char('*').discardR(spacing).map(exprTag(.star)),
+            ps.char('+').discardR(spacing).map(exprTag(.plus)),
+            ps.constant(pk.Input, @as(?Expr.Tag, null)),
+        }),
+        ps.optional(ps.seq(.{
+            ps.discardSeq(.{ ps.char(':'), spacing }),
+            ps.option(ps.digits(10)).discardR(spacing),
+        })),
+    }, suffixFn);
 
     fn prefixFn(mt: ?Expr.Tag, e: Expr, mallocator: ?mem.Allocator) !Expr {
         const t = mt orelse return e;
@@ -871,6 +888,7 @@ pub const parsers = struct {
         };
     }
 
+    /// Prefix <- AND Suffix / NOT Suffix / Suffix
     pub const prefix = ps.seqMapAlloc(.{
         ps.choice(.{
             ps.char('&').discardR(spacing).map(exprTag(.amp)),
@@ -884,7 +902,8 @@ pub const parsers = struct {
     pub const sequence = ps.choice(.{
         ps.seqMap(.{ prefix, ps.many(prefix, .{}) }, Expr.initPlusRes),
         // the following allows for lone trailing '/' which translates to
-        // 'or empty string'.  this is when prefix fails and eos or end of def
+        // 'or empty string'.  this only happens when prefix fails and
+        // 'eos or end of def' succeeds.
         ps.choice(.{
             ps.discardSeq(.{ spacing, ps.eos }),
             ps.peek(ps.seq(.{ ident_str, left_arrow })).discard(),
@@ -911,7 +930,11 @@ pub const parsers = struct {
 
     pub const left_arrow = ps.discardSeq(.{ ps.str("<-"), spacing });
     pub const ident_arrow = ident_str.discardR(left_arrow);
+
+    /// Definition <- Identifier LEFTARROW Expression
     pub const def = ps.seq(.{ ident_arrow, expression });
+
+    /// Grammar <- Spacing Definition+ EndOfFile
     pub const grammar = spacing
         .discardL(def.many1())
         .discardR(ps.eos)

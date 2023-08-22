@@ -186,7 +186,5 @@ test "peg grammar" {
 }
 
 test "peg capture" {
-    try checkSame(pegps.grammar,
-        \\a <- { 'a' }
-    );
+    try checkSame(pegps.grammar, "a <- 'a':0");
 }
