@@ -889,6 +889,28 @@ pub fn option(comptime p: anytype) Option(p) {
     };
 }
 
+pub fn Optional(comptime p: anytype) type {
+    const P = TypeOf(p);
+    return ParserWithErrorSet(P.Input, ?P.Ok, P.Err);
+}
+
+/// a parser that always succeeds with either the result of 'p' or null.  when
+/// 'p' fails, no output is consumed.
+pub fn optional(comptime p: anytype) Optional(p) {
+    const P = Optional(p);
+    return .{
+        .runFn = struct {
+            fn run(_: P, i: P.Input, opts: Options) P.Result {
+                const r = p.run(i, opts);
+                if (r.output == .err) return P.ok(i, null, r.resource);
+                return P.ok(r.input, r.output.ok, r.resource);
+            }
+        }.run,
+        .fail_handler = p.fail_handler,
+        .type = .optional,
+    };
+}
+
 /// a parser that runs 'p' interspersed with 'sep' many times appending 'p's
 /// output to a list until 'p' fails.  'sep' outputs are discarded.
 /// 'success_limits' limits how many times 'p' must succeed. requires allocator.
