@@ -1,0 +1,13 @@
+Stmt <- Expr ';'
+Expr <- Term Expr' /
+Expr' <- '+' Term Expr' /
+Term <- Factor Term'
+Term' <- '*' Factor Term' /
+Factor <- '(' Expr ')' / [0-9]
+
+# Stmt -> Expr ';' .
+# Expr -> Term Expr2 | .
+# Expr2 -> '+' Term Expr2 | .
+# Term -> Factor Term2 .
+# Term2 -> '*' Factor Term2 | .
+# Factor -> ( Expr ) | [0-9] .

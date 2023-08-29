@@ -142,14 +142,7 @@ test "pattern optimizations" {
 test "first sets and nullability" {
     // example is from https://holub.com/goodies/compiler/compilerDesignInC.pdf
     // section 4.7.1
-    const input =
-        \\stmt <- expr ';'
-        \\expr <- term expr2 /
-        \\expr2 <- '+' term expr2 /
-        \\term <- factor term2
-        \\term2 <- '*' factor term2 /
-        \\factor <- '(' expr ')' / [0-9]
-    ;
+    const input = @embedFile("../examples/stmt.peg");
 
     var arena = std.heap.ArenaAllocator.init(talloc);
     defer arena.deinit();
@@ -157,18 +150,29 @@ test "first sets and nullability" {
     const Ctx = pk.pattern.ParseContext(void);
     var ctx = try Ctx.init(.{ .allocator = arena.allocator() }, g);
     const rules = ctx.rules;
-    try expectFormat("[(0-9;]", "{}", .{rules[0].first_set}); // stmt
+    try expectFormat("[(0-9;]", "{}", .{rules[0].first_set}); // Stmt
     try testing.expect(rules[0].nullability == .non_nullable);
-    try expectFormat("[(0-9]", "{}", .{rules[1].first_set}); // expr
+    try expectFormat("[(0-9]", "{}", .{rules[1].first_set}); // Expr
     try testing.expect(rules[1].nullability == .nullable);
-    try expectFormat("[+]", "{}", .{rules[2].first_set}); // expr2
+    try expectFormat("[+]", "{}", .{rules[2].first_set}); // Expr'
     try testing.expect(rules[2].nullability == .nullable);
-    try expectFormat("[(0-9]", "{}", .{rules[3].first_set}); // term
+    try expectFormat("[(0-9]", "{}", .{rules[3].first_set}); // Term
     try testing.expect(rules[3].nullability == .non_nullable);
-    try expectFormat("[*]", "{}", .{rules[4].first_set}); // term2
+    try expectFormat("[*]", "{}", .{rules[4].first_set}); // Term'
     try testing.expect(rules[4].nullability == .nullable);
-    try expectFormat("[(0-9]", "{}", .{rules[5].first_set}); // factor
+    try expectFormat("[(0-9]", "{}", .{rules[5].first_set}); // Factor
     try testing.expect(rules[5].nullability == .non_nullable);
+
+    // for (rules[0..g.grammar.len]) |r| {
+    //     std.debug.print("{s} {} {}\n", .{ r.rule_name, r.first_set, r.follow_set });
+    // }
+    try expectFormat("[]", "{}", .{rules[0].follow_set});
+    try expectFormat("[);]", "{}", .{rules[1].follow_set});
+    try expectFormat("[);]", "{}", .{rules[2].follow_set});
+    try expectFormat("[)+;]", "{}", .{rules[3].follow_set});
+    try expectFormat("[)+;]", "{}", .{rules[4].follow_set});
+    // [)-+] is equivalent to [)*+]
+    try expectFormat("[)-+;]", "{}", .{rules[5].follow_set});
 }
 
 test "basic captures" {
