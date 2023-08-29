@@ -156,6 +156,8 @@ const Rule = struct {
     pattern: Pattern,
     /// set of possible first characters
     first_set: Expr.Class = .{ .bitset = Expr.Class.Set.initEmpty() },
+    /// set of possible following characters
+    follow_set: Expr.Class = .{ .bitset = Expr.Class.Set.initEmpty() },
     /// 'nullable' means that the rule may succeed without consuming any input
     nullability: Nullability,
 
@@ -442,6 +444,8 @@ pub const Pattern = union(enum) {
         };
     }
 
+    const Visited = std.BoundedArray(u32, 16);
+
     /// convert the rules from the grammar 'g' to an optimized format
     pub fn optimize(
         gexpr: Expr,
@@ -461,23 +465,39 @@ pub const Pattern = union(enum) {
         }
 
         const rules = try arena.alloc(Rule, gexpr.grammar.len);
-        // 2. convert grammar to Pattern and optimize
+        // 2. convert Expr grammar to Pattern
         for (0..gexpr.grammar.len) |i| {
-            rules[i].rule_id = @truncate(i);
-            rules[i].rule_name = gexpr.grammar[i][0];
-            const pat = try fromExpr(arena, gexpr.grammar[i][1], rules[i].rule_id, map);
-            rules[i].pattern = if (mode == .optimized)
-                try optimizeImpl(gexpr, pat, map, 0, arena, mode)
-            else
-                pat;
-            // debug("optimize() rule={s} nullability={}\n", .{ @tagName(G.rules[i].rule_id), rules[i].nullability });
+            const rule_id: u32 = @truncate(i);
+            rules[i] = .{
+                .rule_id = rule_id,
+                .rule_name = gexpr.grammar[i][0],
+                .pattern = try fromExpr(arena, gexpr.grammar[i][1], rule_id, map),
+                .nullability = .unknown,
+            };
         }
 
         // 3. calculate nullability and first sets
         for (rules) |*rule| {
             rule.nullability = nullability(rule.pattern, rules, rule.rule_id);
-            rule.first_set = .{ .bitset = Expr.Class.Set.initEmpty() };
-            calcFirstSet(rule.pattern, rules, &rule.first_set, rule.rule_id);
+            var visited: Visited = .{};
+            try visited.append(rule.rule_id);
+            calcFirstSet(rule.pattern, rules, &rule.first_set, rule.rule_id, &visited);
+        }
+
+        // 4. calcuate follow sets
+        for (rules) |*a| {
+            for (rules) |b| {
+                if (a.rule_id == b.rule_id) continue;
+                var visited: Visited = .{};
+                try visited.append(a.rule_id);
+                calcFollowSet(b.pattern, rules, &a.follow_set, a.rule_id, b.rule_id, &visited, .no_accumulate);
+            }
+        }
+
+        // 5. optimize
+        if (mode == .optimized) {
+            for (rules) |*rule|
+                rule.pattern = try optimizeImpl(gexpr, rule.pattern, map, 0, arena, mode);
         }
         return rules;
     }
@@ -515,6 +535,7 @@ pub const Pattern = union(enum) {
         rules: []const Rule,
         first_set: *Expr.Class,
         start_rule_id: u32,
+        visited: *Visited,
     ) void {
         // debug("calcFirstSet {s}={} first_set={}\n", .{ @tagName(pat), pat, first_set.* });
         switch (pat) {
@@ -528,52 +549,128 @@ pub const Pattern = union(enum) {
             .alt => |ps| {
                 for (ps) |p| {
                     var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
-                    calcFirstSet(p, rules, &c, start_rule_id);
+                    calcFirstSet(p, rules, &c, start_rule_id, visited);
                     first_set.bitset.setUnion(c.bitset);
                 }
             },
             .seq => |ps| {
                 for (ps) |p| {
-                    var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
-                    calcFirstSet(p, rules, &c, start_rule_id);
+                    calcFirstSet(p, rules, first_set, start_rule_id, visited);
                     // debug("seq c={}\n", .{Expr{ .class = c }});
-                    first_set.bitset.setUnion(c.bitset);
                     if (nullability(p, rules, start_rule_id) == .non_nullable)
                         break;
                 }
             },
             .many, .opt => |p| {
-                var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
-                calcFirstSet(p.*, rules, &c, start_rule_id);
-                first_set.bitset.setUnion(c.bitset);
+                calcFirstSet(p.*, rules, first_set, start_rule_id, visited);
             },
             .amp => |p| {
                 var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
-                calcFirstSet(p.*, rules, &c, start_rule_id);
+                calcFirstSet(p.*, rules, &c, start_rule_id, visited);
                 first_set.bitset.setIntersection(c.bitset);
             },
             .not => |p| {
                 if (p.* == .class) {
-                    calcFirstSet(p.*, rules, first_set, start_rule_id);
+                    calcFirstSet(p.*, rules, first_set, start_rule_id, visited);
                     first_set.bitset.toggleAll();
                 } else {
                     var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
-                    calcFirstSet(p.*, rules, &c, start_rule_id);
+                    calcFirstSet(p.*, rules, &c, start_rule_id, visited);
                     first_set.bitset = c.bitset;
                 }
             },
-            inline .memo, .cap => |m| calcFirstSet(m.pat.*, rules, first_set, start_rule_id),
+            inline .memo, .cap => |m| calcFirstSet(m.pat.*, rules, first_set, start_rule_id, visited),
             .nonterm => |id| {
-                if (id != start_rule_id) {
-                    var c = Expr.Class{ .bitset = Expr.Class.Set.initEmpty() };
-                    calcFirstSet(rules[id].pattern, rules, &c, start_rule_id);
-                    first_set.bitset.setUnion(c.bitset);
+                if (id != start_rule_id and
+                    mem.indexOfScalar(u32, visited.constSlice(), id) == null)
+                {
+                    calcFirstSet(rules[id].pattern, rules, first_set, start_rule_id, visited);
                 }
             },
             .dot => first_set.bitset = Expr.Class.Set.initFull(),
             .eos, .empty => {},
         }
         // debug("calcFirstSet end {s}={} first_set={}\n", .{ @tagName(pat), pat, first_set.* });
+    }
+
+    /// accumulate first_sets of things which follow A in a seq into
+    /// 'follow_set' until a non-nullable or end of seq.
+    /// if A is rightmost in the seq, also add B's follows to A.  A is rightmost
+    /// when it is the last non-nullable in a sequence.
+    pub fn calcFollowSet(
+        pat: Pattern,
+        rules: []Rule,
+        follow_set: *Expr.Class,
+        /// the rule_id of this rule and follow_set, aka A
+        a_id: u32,
+        /// the rule_id being visited, aka B
+        b_id: u32,
+        visited: *Visited,
+        /// .accumulate if we've previously matched an A in sequence
+        mode: enum { accumulate, no_accumulate },
+    ) void {
+        switch (pat) {
+            .seq => |ps| {
+                // let A = rules[a_id]
+                // * not rightmost
+                //   when R <- ... A nullables B... =>
+                //     add FIRST(nullables) | FIRST(B) to follow_set
+                // * rightmost
+                //   when R <- ... A nullables      =>
+                //     add FOLLOW(R) to follow_set
+                //
+                // search the sequence for nonterm entries w/ id == a_id
+                std.debug.assert(b_id != a_id);
+                var i: usize = 0;
+                while (i < ps.len) : (i += 1) {
+                    const curr = ps[i];
+                    const is_a = curr == .nonterm and curr.nonterm == a_id;
+
+                    if (is_a) {
+                        // found A, collect first_sets into follow_set while nullable
+                        i += 1;
+                        while (i < ps.len) : (i += 1) {
+                            const pat_b = ps[i];
+                            const b_nullability = if (pat_b == .nonterm) blk: {
+                                follow_set.bitset.setUnion(rules[pat_b.nonterm].first_set.bitset);
+                                break :blk rules[pat_b.nonterm].nullability;
+                            } else blk: {
+                                calcFollowSet(pat_b, rules, follow_set, a_id, b_id, visited, .accumulate);
+                                break :blk nullability(pat_b, rules, a_id);
+                            };
+                            if (b_nullability != .nullable) break;
+                        }
+
+                        if (i == ps.len) {
+                            // rightmost
+                            follow_set.bitset.setUnion(rules[b_id].follow_set.bitset);
+                        } else {
+                            // not rightmost. already accumulated
+                        }
+                    }
+                }
+            },
+            .alt => |ps| {
+                for (ps) |p|
+                    calcFollowSet(p, rules, follow_set, a_id, b_id, visited, mode);
+            },
+            .nonterm => |id| {
+                if (id != a_id and
+                    mem.indexOfScalar(u32, visited.constSlice(), id) == null)
+                {
+                    visited.append(id) catch return;
+                    calcFollowSet(rules[id].pattern, rules, follow_set, a_id, id, visited, mode);
+                }
+            },
+            .empty, .eos => {},
+            .class => |c| if (mode == .accumulate) follow_set.bitset.setUnion(c.bitset),
+            .literal => |l| if (mode == .accumulate) follow_set.bitset.set(l.ptr[0]),
+            .dot => if (mode == .accumulate) {
+                follow_set.bitset = Expr.Class.Set.initFull();
+            },
+            .many, .not, .amp, .opt => |ip| calcFollowSet(ip.*, rules, follow_set, a_id, b_id, visited, mode),
+            inline .memo, .cap => |x| calcFollowSet(x.pat.*, rules, follow_set, a_id, b_id, visited, mode),
+        }
     }
 
     // run() is recursive so it is optimized to reduce fn call overhead by
