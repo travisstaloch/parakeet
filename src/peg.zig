@@ -673,7 +673,7 @@ pub const parsers = struct {
     pub const eol = ps.choice(.{ ps.str("\r\n"), ps.str("\n"), ps.str("\r") });
     pub const space = ps.choice(.{ ps.anycharIn(" \t").asStr(), eol });
     pub const comment = ps.char('#')
-        .discardL(ps.until(ps.takeWhile(ps.anychar, .{}), eol).discardR(eol));
+        .discardL(ps.until(ps.takeWhile(ps.anychar, .{}), eol).discardR(ps.choice(.{ eol.discard(), ps.eos })));
     pub const spacing = ps.takeWhile(ps.choice(.{ space, comment }), .{});
 
     // zig fmt: off
@@ -684,7 +684,7 @@ pub const parsers = struct {
         }),
         ps.choice(.{
             ps.satisfy(std.ascii.isAlphanumeric), 
-            ps.char('_'),
+            ps.anycharIn("_'"),
         })
             .takeWhile(.{}) 
     })

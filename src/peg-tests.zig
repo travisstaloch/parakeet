@@ -64,6 +64,7 @@ test "peg expression" {
         \\a b
         \\    / 
     );
+    try checkSame(pegps.expression, "Expr'");
 }
 
 test "peg string literal" {
@@ -139,6 +140,7 @@ test "peg character class" {
 
 test "peg misc" {
     try checkStr(pegps.comment, "# comment \n", " comment ");
+    try checkStr(pegps.comment, "# comment", " comment");
 }
 
 test "peg def" {
