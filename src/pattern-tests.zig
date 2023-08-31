@@ -139,7 +139,7 @@ test "pattern optimizations" {
     }
 }
 
-test "first sets and nullability" {
+test "first sets, nullability, and follow sets" {
     // example is from https://holub.com/goodies/compiler/compilerDesignInC.pdf
     // section 4.7.1
     const input = @embedFile("../examples/stmt.peg");

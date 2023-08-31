@@ -150,7 +150,7 @@ pub const Literal = struct { ptr: [*]const u8, len: u32 };
 
 pub const Nullability = enum { unknown, non_nullable, nullable };
 
-const Rule = struct {
+pub const Rule = struct {
     rule_id: u32,
     rule_name: []const u8,
     pattern: Pattern,
@@ -444,7 +444,7 @@ pub const Pattern = union(enum) {
         };
     }
 
-    const Visited = std.BoundedArray(u32, 16);
+    pub const Visited = std.BoundedArray(u32, 16);
 
     /// convert the rules from the grammar 'g' to an optimized format
     pub fn optimize(
