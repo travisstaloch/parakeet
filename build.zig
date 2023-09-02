@@ -23,10 +23,15 @@ pub fn build(b: *std.Build) void {
         unit_tests.filter = test_filter;
         unit_tests.addModule("parakeet", parakeet_mod);
         unit_tests.main_pkg_path = .{ .path = "." };
-        const run_unit_tests = b.addRunArtifact(unit_tests);
-        run_unit_tests.has_side_effects = true;
+        const install_test = b.addInstallArtifact(unit_tests, .{});
         const test_step = b.step("test", "Run unit tests");
-        test_step.dependOn(&run_unit_tests.step);
+        test_step.dependOn(&install_test.step);
+        const run_tests_option = b.option(bool, "run-tests", "") orelse true;
+        if (run_tests_option) {
+            const run_unit_tests = b.addRunArtifact(unit_tests);
+            run_unit_tests.has_side_effects = true;
+            test_step.dependOn(&run_unit_tests.step);
+        }
     }
 
     { // examples
