@@ -24,7 +24,7 @@ test "pattern with negated character classes" {
     const g = try pk.peg.parseString(pk.peg.parsers.grammar, input, arena.allocator());
     const Ctx = pk.pattern.ParseContext(void);
     var ctx = try Ctx.init(.{ .allocator = arena.allocator() }, g);
-    const r = pk.pattern.parse(Ctx, &ctx, 5,
+    const r = try pk.pattern.parse(Ctx, &ctx, 5,
         \\"str"
     );
     try testing.expect(r.output == .ok);
@@ -60,22 +60,19 @@ test "negated char class matches not char class" {
 
     inline for (expecteds) |expected| {
         {
-            var ra: Ctx.Result = undefined;
             ctx.input = pk.input(expected[0]);
-            ctx.rules[0].pattern.run(Ctx, &ctx, &ra);
+            const ra = try ctx.rules[0].pattern.run(Ctx, &ctx);
             // std.debug.print("negated={} r={} expected=({s},{})\n", .{ negated, r, expected[0], expected[1] });
             try testing.expect((ra.output != expected[1]));
         }
         {
-            var rb: Ctx.Result = undefined;
             ctx.input = pk.input(expected[0]);
-            ctx.rules[1].pattern.run(Ctx, &ctx, &rb);
+            const rb = try ctx.rules[1].pattern.run(Ctx, &ctx);
             try testing.expect((rb.output == expected[1]));
         }
         {
-            var rc: Ctx.Result = undefined;
             ctx.input = pk.input(expected[0]);
-            ctx.rules[2].pattern.run(Ctx, &ctx, &rc);
+            const rc = try ctx.rules[2].pattern.run(Ctx, &ctx);
             try testing.expect((rc.output == expected[1]));
         }
     }
@@ -201,7 +198,7 @@ test "basic captures" {
         .allocator = arena.allocator(),
         .capture_handler = &handler,
     }, g);
-    const r = pk.pattern.parse(Ctx, &ctx, 0, "foobar");
+    const r = try pk.pattern.parse(Ctx, &ctx, 0, "foobar");
     try testing.expect(r.output == .ok);
     try testing.expectEqual(@as(usize, 2), handler.captures.items.len);
     try testing.expectEqualStrings("foo", handler.captures.items[0]);
@@ -290,7 +287,7 @@ test "json parser with captures" {
     }, g);
 
     // std.debug.print("{s} <- {}\n", .{ g.grammar[3][0], g.grammar[3][1] });
-    const r = pk.pattern.parse(Ctx, &ctx, 0,
+    const r = try pk.pattern.parse(Ctx, &ctx, 0,
         \\[
         \\{"a": {"b": 0}},
         \\{"a": {"b": 1}},
@@ -303,4 +300,36 @@ test "json parser with captures" {
     try testing.expectEqual(@as(u8, 0), ctx.capture_handler.as.items[0].b);
     try testing.expectEqual(@as(u8, 1), ctx.capture_handler.as.items[1].b);
     try testing.expectEqual(@as(u8, 2), ctx.capture_handler.as.items[2].b);
+}
+
+test "json parser basic" {
+    const input = @embedFile("../examples/json.peg");
+    var arena = std.heap.ArenaAllocator.init(talloc);
+    defer arena.deinit();
+    const Ctx = pk.pattern.ParseContext(void);
+    const g = try pk.peg.parseString(pk.peg.parsers.grammar, input, arena.allocator());
+    var ctx = try Ctx.init(.{
+        .allocator = arena.allocator(),
+        .mode = .optimized,
+    }, g);
+    const jsons = [_][]const u8{
+        "null",   "true", "false",
+        \\"string"
+        ,
+        \\"\u00f8"
+        ,
+        "123",    "1.23", "1.23e10",
+        "[null]",
+        \\[null, true, false, "string", 123, 1.23e10]
+        ,
+        \\{"a": 1, "b": [1,2,3]}
+        ,
+        \\{"a": {"b": 2}}
+    };
+
+    for (jsons) |json| {
+        const r = try pk.pattern.parse(Ctx, &ctx, 0, json);
+        try testing.expect(r.output == .ok);
+        // std.debug.print("{s}", .{ctx.input.s[r.output.ok[0]..r.output.ok[1]]});
+    }
 }
