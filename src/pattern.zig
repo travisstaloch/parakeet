@@ -85,6 +85,17 @@ pub fn ParseContext(comptime CaptureHandler: type) type {
             pub fn ok(i: pk.Input, s: [2]u32) Result {
                 return .{ .input = i, .output = .{ .ok = s } };
             }
+
+            pub fn format(r: Result, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+                _ = options;
+                _ = fmt;
+                try writer.print("{s}", .{@tagName(r.output)});
+                switch (r.output) {
+                    .err => {},
+                    .ok => |o| try writer.print(" {}..{}={s}", .{ o[0], o[1], r.input.s[o[0]..o[1]] }),
+                }
+                try writer.print(" {}..", .{r.input.index});
+            }
         };
 
         /// initializes 'rules' and 'allocator' fields. 'input' and 'rule_id'
@@ -115,9 +126,10 @@ pub fn ParseContext(comptime CaptureHandler: type) type {
                         "CaptureHandler.onCapture() to be \n'*" ++
                         @typeName(CaptureHandler) ++ "'.  found \n' " ++
                         @typeName(Param1) ++ "'");
+
+                // debug("ok={},{}/{} rule={s}\n", .{ ok[0], ok[1], ctx.input.len, rule_name });
                 std.debug.assert(ok[0] <= ok[1]);
                 std.debug.assert(ok[1] <= ctx.input.len);
-                // std.debug.print("ok={},{} s={}\n", .{ ok[0], ok[1], s });
                 try ctx.capture_handler.onCapture(.{
                     .rule_name = rule_name,
                     .id = id,
@@ -134,16 +146,13 @@ pub fn parse(
     ctx: *Ctx,
     start_rule_id: u32,
     input: []const u8,
-) Ctx.Result {
+) !Ctx.Result {
     ctx.input = pk.input(input);
     ctx.rule_id = start_rule_id;
     ctx.memo.clearRetainingCapacity();
 
-    var result: Ctx.Result = undefined;
     const pat = ctx.rules[ctx.rule_id].pattern;
-    pat.run(Ctx, ctx, &result);
-
-    return result;
+    return pat.run(Ctx, ctx);
 }
 
 pub const Literal = struct { ptr: [*]const u8, len: u32 };
@@ -298,6 +307,7 @@ pub const Pattern = union(enum) {
 
     /// combine sequences of literals into a single literal
     fn combineSeq(pats: []const Pattern, arena: mem.Allocator) !?Pattern {
+        if (pats.len == 1) return pats[0];
         const ok = for (pats) |pat| {
             if (!(pat == .literal or pat == .empty)) break false;
         } else true;
@@ -676,7 +686,7 @@ pub const Pattern = union(enum) {
     // run() is recursive so it is optimized to reduce fn call overhead by
     // passing 'ctx' and 'res' as pointers. because of this, they are often
     //  reused below and some control flow may be sligntly non-intuitive.
-    pub fn run(
+    pub fn run2(
         pat: Pattern,
         comptime Ctx: type,
         ctx: *Ctx,
@@ -701,7 +711,7 @@ pub const Pattern = union(enum) {
                         break :blk;
 
                     if (debugthis)
-                        debug("{s} first_set {} missing '{?c}'\n", .{ ctx.rules[id].rule_name, rule.first_set, mc });
+                        debug("{s} first_set {} doesn't include '{?c}'\n", .{ ctx.rules[id].rule_name, rule.first_set, mc });
                     res.* = Result.err(in);
                     return;
                 }
@@ -833,6 +843,260 @@ pub const Pattern = union(enum) {
         }
     }
 
+    pub fn StackItem(comptime Ctx: type) type {
+        return struct {
+            pat: Pattern,
+            visits: usize,
+            res: Ctx.Result,
+            pub fn init(pat: Pattern, res: Ctx.Result) @This() {
+                return .{
+                    .pat = pat,
+                    .res = res,
+                    .visits = std.math.maxInt(usize),
+                };
+            }
+        };
+    }
+
+    pub fn run(
+        pat: Pattern,
+        comptime Ctx: type,
+        ctx: *Ctx,
+    ) !Ctx.Result {
+        const Result = Ctx.Result;
+
+        const debugthis = false;
+        if (debugthis) {
+            debug("{} ", .{ctx.input});
+            if (pat != .nonterm) debug("{} {s}\n", .{ pat, @tagName(pat) });
+        }
+
+        const Item = StackItem(Ctx);
+        var stack = try std.ArrayListUnmanaged(Item).initCapacity(ctx.allocator, 128);
+        defer stack.deinit(ctx.allocator);
+        stack.appendAssumeCapacity(Item.init(pat, Result.err(ctx.input)));
+
+        while (true) {
+            if (stack.items.len == 0) {
+                stack.items.len += 1;
+                return stack.items[0].res;
+            }
+            stack.items[stack.items.len - 1].visits +%= 1;
+            const top = stack.pop();
+            if (debugthis)
+                debug("stack.len={: >3} {} {s: <3} {s: >7}:{} {}\n", .{
+                    stack.items.len + 1,
+                    ctx.input,
+                    @tagName(top.res.output),
+                    @tagName(top.pat),
+                    @as(isize, @bitCast(top.visits)),
+                    top.pat,
+                });
+            switch (top.pat) {
+                .nonterm => |id| {
+                    const rule = ctx.rules[id];
+                    // if the rule is non-nullable and must consume some input,
+                    // do a fast check of the first character to see if its
+                    // in this rule's 'first_set'
+                    if (rule.nullability == .non_nullable) blk: {
+                        const mc = ctx.input.get(0);
+                        if (mc) |c| if (rule.first_set.bitset.isSet(c))
+                            break :blk;
+
+                        if (debugthis)
+                            debug("{s} first_set {} doesn't include '{?c}'\n", .{ ctx.rules[id].rule_name, rule.first_set, mc });
+                        stack.items.ptr[stack.items.len].res = Result.err(ctx.input);
+                        continue;
+                    }
+                    const traillen = if (is_debug_mode) ctx.nonterm_trail.len else {};
+                    defer {
+                        if (is_debug_mode) ctx.nonterm_trail.len = traillen;
+                    }
+                    if (is_debug_mode) {
+                        const rulename = ctx.rules[id].rule_name;
+                        const len = @min(ctx.nonterm_trail.buffer.len - ctx.nonterm_trail.len, rulename.len);
+                        try ctx.nonterm_trail.appendSlice(rulename[0..len]);
+                        try ctx.nonterm_trail.append(',');
+                    }
+
+                    ctx.rule_id = id;
+                    try stack.append(ctx.allocator, Item.init(
+                        rule.pattern,
+                        Result.ok(ctx.input, ctx.input.restRange()),
+                    ));
+                },
+                .literal => |lit| {
+                    stack.items.ptr[stack.items.len].res =
+                        if (ctx.input.startsWith(lit.ptr[0..lit.len]))
+                        Result.ok(
+                            ctx.input.advanceBy(lit.len),
+                            ctx.input.range(lit.len),
+                        )
+                    else
+                        Result.err(ctx.input);
+                },
+                .class => |klass| {
+                    const ic = ctx.input.get(0) orelse {
+                        stack.items.ptr[stack.items.len].res = Result.err(ctx.input);
+                        continue;
+                    };
+                    stack.items.ptr[stack.items.len].res = if (klass.bitset.isSet(ic))
+                        Result.ok(ctx.input.advanceBy(1), ctx.input.range(1))
+                    else
+                        Result.err(ctx.input);
+                },
+                .dot => stack.items.ptr[stack.items.len].res = if (ctx.input.hasCount(1))
+                    Result.ok(ctx.input.advanceBy(1), ctx.input.range(1))
+                else
+                    Result.err(ctx.input),
+                .eos => stack.items.ptr[stack.items.len].res = if (ctx.input.eos())
+                    Result.ok(ctx.input, ctx.input.restRange())
+                else
+                    Result.err(ctx.input),
+                .empty => stack.items.ptr[stack.items.len].res = Result.ok(ctx.input, ctx.input.range(0)),
+                .seq => |pats| {
+                    if (top.visits < pats.len) {
+                        if (top.visits == 0)
+                            stack.items.ptr[stack.items.len].res = Result.err(ctx.input)
+                        else {
+                            const prev = stack.items.ptr[stack.items.len + 1];
+                            // std.log.debug("seq prev={s}", .{@tagName(prev.res.output)});
+                            if (prev.res.output == .err) continue;
+                            ctx.input.index = prev.res.input.index;
+                        }
+                        stack.items.len += 1;
+                        try stack.append(ctx.allocator, Item.init(
+                            pats[top.visits],
+                            Result.err(ctx.input),
+                        ));
+                    } else if (top.visits == pats.len) {
+                        const prev = stack.items.ptr[stack.items.len + 1];
+                        // debug("seq done \nprev={} \ntop={}\n", .{ prev.res, top.res });
+                        stack.items.ptr[stack.items.len].res = Result.ok(
+                            prev.res.input,
+                            top.res.input.rangeTo(prev.res.input.index),
+                        );
+                        ctx.input.index = prev.res.input.index;
+                        stack.items.ptr[stack.items.len].visits = std.math.maxInt(usize);
+                    } else @panic("unreachable");
+                },
+                .alt => |pats| {
+                    if (top.visits < pats.len) {
+                        if (top.visits != 0) {
+                            const prev = stack.items.ptr[stack.items.len + 1];
+                            if (prev.res.output == .ok) {
+                                // debug("alt ok prev.input={}\n", .{prev.res.input});
+                                stack.items.ptr[stack.items.len].res = prev.res;
+                                ctx.input.index = prev.res.input.index;
+                                continue;
+                            }
+                        }
+                        stack.items.len += 1;
+                        ctx.input.index = top.res.input.index;
+                        try stack.append(ctx.allocator, Item.init(
+                            pats[top.visits],
+                            Result.err(ctx.input),
+                        ));
+                    } else if (top.visits == pats.len) {
+                        const prev = stack.items.ptr[stack.items.len + 1];
+                        // debug("alt done prev.input={}\n", .{prev.res.input});
+                        stack.items.ptr[stack.items.len].res = prev.res;
+                        ctx.input.index = prev.res.input.index;
+                        stack.items.ptr[stack.items.len].visits = std.math.maxInt(usize);
+                    } else @panic("unreachable");
+                },
+                .many => |p| {
+                    // debug("many top.visits={}\n", .{top.visits});
+                    if (top.visits == 0) {
+                        // first time
+                        stack.items.ptr[stack.items.len].res =
+                            Result.err(ctx.input);
+                        stack.items.len += 1;
+                        try stack.append(ctx.allocator, Item.init(
+                            p.*,
+                            Result.err(ctx.input),
+                        ));
+                    } else {
+                        const prev = stack.items.ptr[stack.items.len + 1];
+                        // debug("many prev={s}:{} ctx={}\n", .{ @tagName(prev.res.output), prev.res.input, ctx.input });
+                        if (prev.res.output == .ok) {
+                            ctx.input.index = prev.res.input.index;
+                            stack.items.len += 2;
+                        } else {
+                            stack.items.ptr[stack.items.len].res =
+                                Result.ok(ctx.input, top.res.input.rangeTo(prev.res.input.index));
+                        }
+                    }
+                },
+                .opt => |p| {
+                    if (top.visits == 0) {
+                        stack.items.len += 1;
+                        try stack.append(ctx.allocator, Item.init(
+                            p.*,
+                            Result.err(ctx.input),
+                        ));
+                    } else if (top.visits == 1) {
+                        const prev = stack.items.ptr[stack.items.len + 1];
+                        // debug("opt prev={} {s} top={} ctx={}\n", .{ prev.res.input, @tagName(prev.res.output), top.res.input, ctx.input });
+                        stack.items.ptr[stack.items.len].res = if (prev.res.output == .ok)
+                            prev.res
+                        else
+                            Result.ok(top.res.input, top.res.input.range(0));
+                    } else @panic("unreachable");
+                },
+                .not => |p| {
+                    if (top.visits == 0) {
+                        stack.items.len += 1;
+                        try stack.append(ctx.allocator, Item.init(
+                            p.*,
+                            Result.err(ctx.input),
+                        ));
+                    } else if (top.visits == 1) {
+                        const prev = stack.items.ptr[stack.items.len + 1];
+                        // debug("not input={} {s}\n", .{ ctx.input, @tagName(prev.res.output) });
+                        ctx.input.index = top.res.input.index;
+                        stack.items.ptr[stack.items.len].res = if (prev.res.output == .ok)
+                            Result.err(top.res.input)
+                        else
+                            Result.ok(top.res.input, top.res.input.range(0));
+                        // debug("not res={s}\n", .{@tagName(stack.items.ptr[stack.items.len].res.output)});
+                    } else @panic("unreachable");
+                },
+                .amp => |p| {
+                    _ = p;
+                    unreachable;
+                },
+                .memo => |m| {
+                    _ = m;
+                    unreachable;
+                },
+                .cap => |cap| {
+                    if (top.visits == 0) {
+                        stack.items.len += 1;
+                        try stack.append(ctx.allocator, Item.init(
+                            cap.pat.*,
+                            Result.err(ctx.input),
+                        ));
+                    } else if (top.visits == 1) {
+                        const prev = stack.items.ptr[stack.items.len + 1];
+                        // debug("cap prev={}\n", .{prev.res});
+                        if (prev.res.output == .ok) {
+                            ctx.onCapture(
+                                ctx.rules[ctx.rule_id].rule_name,
+                                cap.id,
+                                prev.res.output.ok,
+                            ) catch |e| {
+                                stack.items.ptr[stack.items.len].res = Result.errWith(top.res.input, e);
+                            };
+                        }
+                        stack.items.ptr[stack.items.len].res = prev.res;
+                        ctx.input.index = top.res.input.index;
+                    } else @panic("unreachable");
+                },
+            }
+        }
+    }
+
     pub fn format(
         p: Pattern,
         comptime fmt: []const u8,
@@ -867,8 +1131,10 @@ pub const Pattern = union(enum) {
                 if (depth != 0) _ = try writer.write(" )");
             },
             .seq => |pats| for (pats, 0..) |p, i| {
+                // if (depth > 1) _ = try writer.write("( ");
                 if (i != 0) try writer.writeByte(' ');
                 try formatImpl(p, fmt, opts, writer, depth + 1);
+                // if (depth > 1) _ = try writer.write(" )");
             },
             .many => |ip| {
                 try formatImpl(ip.*, fmt, opts, writer, depth);
