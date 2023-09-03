@@ -38,7 +38,7 @@ pub fn main() !void {
     }
     var errcount: usize = 0;
     var bytes_processed: f64 = 0;
-    const Ctx = pk.pattern.ParseContext(void);
+    const Ctx = pk.pattern.ParseContext(void, .{ .max_stack_size = pk.build_options.max_stack_size });
     var timer = try std.time.Timer.start();
 
     const g = try pk.peg.parseString(pk.peg.parsers.grammar, peg_content, alloc);
@@ -46,21 +46,21 @@ pub fn main() !void {
     try stdout.print("parsed grammar with {} rules\n", .{g.grammar.len});
     for (files.items) |file| {
         // std.debug.print("path={s}\n", .{file[0]});
-        const r = pk.pattern.parse(
+        const r = try pk.pattern.parse(
             Ctx,
             &ctx,
             // TODO bring back start_id
             0,
             file[1],
         );
-        if (r.output == .err) {
+        if (r.output.isErr()) {
             try stdout.print(
-                "parse {s} {s} input={}\n",
-                .{ @tagName(r.output), file[0], r.input },
+                "parse {s} {s} index={}\n",
+                .{ r.output.tagName(), file[0], r.index },
             );
             errcount += 1;
         }
-        bytes_processed += @floatFromInt(r.input.index);
+        bytes_processed += @floatFromInt(r.index);
     }
     const ns = timer.read();
     var lines: f64 = 0;

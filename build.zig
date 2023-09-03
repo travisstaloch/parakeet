@@ -5,6 +5,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const options = b.addOptions();
+    const max_stack_option = b.option(u16, "max-stack-size", "maximum parser stack size") orelse 256;
+    options.addOption(u16, "max_stack_size", max_stack_option);
 
     const parakeet_mod = b.addModule("parakeet", .{
         .source_file = .{ .path = "src/lib.zig" },

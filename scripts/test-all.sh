@@ -6,7 +6,7 @@ if [[ "$download" = true ]]; then
   wget https://github.com/simdjson/simdjson/raw/master/jsonexamples/twitter.json -O examples/twitter.json
 fi
 
-args=-freference-trace
+args="-freference-trace -Dmax-stack-size=1024"
 
 zig build test $args
 zig build $args 
