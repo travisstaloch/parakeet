@@ -4,7 +4,10 @@ const pk = @import("lib.zig");
 const Expr = pk.peg.Expr;
 const builtin = @import("builtin");
 const is_debug_mode = builtin.mode == .Debug;
-pub const run_mode: enum { recursive, stack } = .recursive;
+pub const run_mode = std.enums.nameCast(
+    @import("common.zig").RunMode,
+    @import("build_options").run_mode,
+);
 
 pub const Ok = [2]u32;
 
@@ -40,6 +43,7 @@ pub fn ParseContext(comptime CaptureHandler: type, comptime opts: struct { max_s
     return struct {
         input: pk.Input,
         rules: [*]const Rule,
+        rules_len: u32,
         rule_id: u32,
         memo: MemoTable = .{},
         allocator: mem.Allocator,
@@ -111,11 +115,10 @@ pub fn ParseContext(comptime CaptureHandler: type, comptime opts: struct { max_s
                 _ = options;
                 _ = fmt;
                 try writer.print("{s}", .{r.output.tagName()});
-                switch (r.output) {
-                    .err => {},
-                    .ok => |o| try writer.print(" {}..{}={s}", .{ o[0], o[1], r.input.s[o[0]..o[1]] }),
+                if (r.output.isOk()) {
+                    try writer.print(" {}..{}", .{ r.output.data[0], r.output.data[1] });
                 }
-                try writer.print(" {}..", .{r.input.index});
+                try writer.print(" {}..", .{r.index});
             }
         };
 
@@ -129,6 +132,7 @@ pub fn ParseContext(comptime CaptureHandler: type, comptime opts: struct { max_s
             );
             return .{
                 .rules = rules.ptr,
+                .rules_len = @intCast(rules.len),
                 .input = undefined,
                 .rule_id = undefined,
                 .allocator = options.allocator,
@@ -159,6 +163,12 @@ pub fn ParseContext(comptime CaptureHandler: type, comptime opts: struct { max_s
                 });
             }
         }
+
+        pub fn ruleNameId(ctx: Ctx, rule_name: []const u8) ?u32 {
+            return for (ctx.rules[0..ctx.rules_len], 0..) |r, i| {
+                if (std.mem.eql(u8, r.rule_name, rule_name)) break @truncate(i);
+            } else null;
+        }
     };
 }
 
@@ -187,6 +197,7 @@ pub fn parse_stack(
     input: []const u8,
 ) !Ctx.Result {
     ctx.input = pk.input(input);
+    ctx.rule_id = start_rule_id;
     ctx.memo.clearRetainingCapacity();
 
     const pat = &ctx.rules[start_rule_id].pattern;
@@ -901,28 +912,20 @@ pub const Pattern = union(enum) {
         }
     }
 
-    pub fn StackItem(comptime Ctx: type) type {
-        return struct {
-            res: Ctx.Result,
-            pat: *const Pattern,
-            visits: u16,
+    pub const StackItem = struct {
+        pat: *const Pattern,
+        visits: u16,
 
-            pub const max_visits = std.math.maxInt(u16);
+        pub const max_visits = std.math.maxInt(u16);
 
-            comptime {
-                std.debug.assert(@sizeOf(@This()) == 24);
-                std.debug.assert(@sizeOf(Ctx.Result) == 12);
-            }
+        comptime {
+            std.debug.assert(@sizeOf(@This()) == 16);
+        }
 
-            pub fn init(pat: *const Pattern, res: Ctx.Result) @This() {
-                return .{
-                    .pat = pat,
-                    .res = res,
-                    .visits = max_visits,
-                };
-            }
-        };
-    }
+        pub fn init(pat: *const Pattern) @This() {
+            return .{ .pat = pat, .visits = max_visits };
+        }
+    };
 
     pub fn run_stack(
         pat: *const Pattern,
@@ -934,13 +937,16 @@ pub const Pattern = union(enum) {
         const debugthis = false;
         if (debugthis) {
             debug("{} ", .{ctx.input});
-            if (pat != .nonterm) debug("{} {s}\n", .{ pat, @tagName(pat) });
+            if (pat.* != .nonterm) debug("{} {s}\n", .{ pat.*, @tagName(pat.*) });
         }
 
-        const Item = StackItem(Ctx);
-        var stack = try std.ArrayListUnmanaged(Item).initCapacity(ctx.allocator, Ctx.max_stack_size);
+        var stack = try std.ArrayListUnmanaged(StackItem).initCapacity(ctx.allocator, Ctx.max_stack_size);
         defer stack.deinit(ctx.allocator);
-        stack.appendAssumeCapacity(Item.init(pat, Result.err(ctx.input.index)));
+        stack.appendAssumeCapacity(StackItem.init(pat));
+        var res = Ctx.Result.err(ctx.input.index);
+        var index_stack = try std.ArrayListUnmanaged(u32).initCapacity(ctx.allocator, Ctx.max_stack_size);
+        index_stack.appendAssumeCapacity(ctx.input.index);
+        defer index_stack.deinit(ctx.allocator);
 
         while (stack.items.len != 0) {
             stack.items.len -= 1;
@@ -948,13 +954,14 @@ pub const Pattern = union(enum) {
             top.visits +%= 1;
 
             if (debugthis) {
-                debug("stack.items.len={: >3} {} {s: <3} {s: >7}:{} {s} {}\n", .{
-                    stack.items.len + 1,
+                debug("stack.items.len={: >3}/{: >2} {} {s: <3} {s: >7}:{} {s} {}\n", .{
+                    stack.items.len,
+                    index_stack.items.len,
                     ctx.input,
-                    @tagName(top.res.output),
-                    @tagName(top.pat),
-                    @as(isize, @bitCast(top.visits)),
-                    if (top.pat == .nonterm) ctx.rules[top.pat.nonterm].rule_name else "",
+                    res.output.tagName(),
+                    @tagName(top.pat.*),
+                    @as(i16, @bitCast(top.visits)),
+                    if (top.pat.* == .nonterm) ctx.rules[top.pat.nonterm].rule_name else "",
                     top.pat,
                 });
             }
@@ -972,16 +979,13 @@ pub const Pattern = union(enum) {
 
                         if (debugthis)
                             debug("{s} first_set {} doesn't include '{?c}'\n", .{ ctx.rules[id].rule_name, rule.first_set, mc });
-                        stack.items.ptr[stack.items.len].res = Result.err(ctx.input.index);
+                        res = Result.err(ctx.input.index);
                         continue;
                     }
-                    stack.appendAssumeCapacity(Item.init(
-                        &rule.pattern,
-                        Result.ok(ctx.input.index, ctx.input.restRange()),
-                    ));
+                    stack.appendAssumeCapacity(StackItem.init(&rule.pattern));
                 },
                 .literal => |lit| {
-                    stack.items.ptr[stack.items.len].res = if (ctx.input.startsWith(lit.ptr[0..lit.len]))
+                    res = if (ctx.input.startsWith(lit.ptr[0..lit.len]))
                         Result.ok(
                             ctx.input.index + lit.len,
                             ctx.input.range(lit.len),
@@ -991,105 +995,86 @@ pub const Pattern = union(enum) {
                 },
                 .class => |klass| {
                     const ic = ctx.input.get(0) orelse {
-                        stack.items.ptr[stack.items.len].res =
-                            Result.err(ctx.input.index);
+                        res = Result.err(ctx.input.index);
                         continue;
                     };
-                    stack.items.ptr[stack.items.len].res = if (klass.bitset.isSet(ic))
+                    res = if (klass.bitset.isSet(ic))
                         Result.ok(ctx.input.index + 1, ctx.input.range(1))
                     else
                         Result.err(ctx.input.index);
                 },
-                .dot => stack.items.ptr[stack.items.len].res = if (ctx.input.hasCount(1))
+                .dot => res = if (ctx.input.hasCount(1))
                     Result.ok(ctx.input.index + 1, ctx.input.range(1))
                 else
                     Result.err(ctx.input.index),
-                .eos => stack.items.ptr[stack.items.len].res = if (ctx.input.eos())
+                .eos => res = if (ctx.input.eos())
                     Result.ok(ctx.input.index, ctx.input.restRange())
                 else
                     Result.err(ctx.input.index),
-                .empty => stack.items.ptr[stack.items.len].res =
-                    Result.ok(ctx.input.index, ctx.input.range(0)),
+                .empty => res = Result.ok(ctx.input.index, ctx.input.range(0)),
                 .seq => |pats| {
                     if (top.visits < pats.len) {
-                        if (top.visits != 0) {
-                            const prev = stack.items.ptr[stack.items.len + 1];
+                        if (top.visits == 0) {
+                            index_stack.appendAssumeCapacity(ctx.input.index);
+                        } else {
                             // std.log.debug("seq prev={s}", .{@tagName(prev.res.output)});
-                            if (prev.res.output.isErr()) {
-                                stack.items.ptr[stack.items.len].res = prev.res;
-                                ctx.input.index = top.res.index;
+                            if (res.output.isErr()) {
+                                ctx.input.index = index_stack.pop();
                                 continue;
                             }
-                            ctx.input.index = prev.res.index;
+                            ctx.input.index = res.index;
                         }
                         stack.items.len += 1;
-                        stack.items.ptr[stack.items.len] = Item.init(
-                            &pats[top.visits],
-                            Result.err(ctx.input.index),
-                        );
+                        stack.items.ptr[stack.items.len] = StackItem.init(&pats[top.visits]);
                         stack.items.len += 1;
                     } else if (top.visits == pats.len) {
-                        const prev = stack.items.ptr[stack.items.len + 1];
-                        // debug("seq done prev={} top={}\n", .{ prev.res, top.res });
-                        stack.items.ptr[stack.items.len].res = if (prev.res.output.isOk()) Result.ok(
-                            prev.res.index,
-                            .{ top.res.index, prev.res.index },
-                        ) else Result.err(top.res.index);
-                        ctx.input.index = prev.res.index;
-                        stack.items.ptr[stack.items.len].visits = Item.max_visits;
+                        ctx.input.index = res.index;
+                        stack.items.ptr[stack.items.len].visits = StackItem.max_visits;
+                        const index = index_stack.pop();
+                        if (res.output.isOk())
+                            res = Result.ok(ctx.input.index, .{ index, ctx.input.index });
                     } else @panic("unreachable");
                 },
                 .alt => |pats| {
                     if (top.visits < pats.len) {
-                        if (top.visits != 0) {
-                            const prev = stack.items.ptr[stack.items.len + 1];
-                            if (prev.res.output.isOk()) {
+                        if (top.visits == 0) {
+                            index_stack.appendAssumeCapacity(ctx.input.index);
+                        } else {
+                            if (res.output.isOk()) {
                                 // debug("alt ok prev.input={}\n", .{prev.res.index});
-                                stack.items.ptr[stack.items.len].res = prev.res;
-                                ctx.input.index = prev.res.index;
+                                ctx.input.index = res.index;
+                                _ = index_stack.pop();
                                 continue;
-                            }
+                            } else ctx.input.index = index_stack.getLast();
                         }
-                        ctx.input.index = top.res.index;
                         stack.items.len += 1;
-                        stack.items.ptr[stack.items.len] = Item.init(
-                            &pats[top.visits],
-                            Result.err(ctx.input.index),
-                        );
+                        stack.items.ptr[stack.items.len] = StackItem.init(&pats[top.visits]);
                         stack.items.len += 1;
                     } else if (top.visits == pats.len) {
-                        const prev = stack.items.ptr[stack.items.len + 1];
-                        // debug("alt done prev.input={}\n", .{prev.res.index});
-                        stack.items.ptr[stack.items.len].res = prev.res;
-                        ctx.input.index = prev.res.index;
-                        stack.items.ptr[stack.items.len].visits = Item.max_visits;
+                        ctx.input.index = res.index;
+                        stack.items.ptr[stack.items.len].visits = StackItem.max_visits;
+                        _ = index_stack.pop();
                     } else @panic("unreachable");
                 },
                 .many => |p| {
                     // debug("many top.visits={}\n", .{top.visits});
                     if (top.visits == 0) {
-                        // first time
                         stack.items.len += 1;
-                        stack.items.ptr[stack.items.len] = Item.init(
-                            p,
-                            Result.err(ctx.input.index),
-                        );
+                        stack.items.ptr[stack.items.len] = StackItem.init(p);
                         stack.items.len += 1;
+                        index_stack.appendAssumeCapacity(ctx.input.index);
                     } else {
-                        const prev = stack.items.ptr[stack.items.len + 1];
-                        // debug("many prev={s}:{} ctx={}\n", .{ @tagName(prev.res.output), prev.res.index, ctx.input });
-                        if (prev.res.output.isOk()) {
-                            ctx.input.index = prev.res.index;
-                            stack.items.len += 2;
-                            stack.items.ptr[stack.items.len + 1] = Item.init(
-                                p,
-                                Result.err(ctx.input.index),
-                            );
+                        // debug("many res={s} ctx={}\n", .{ res.output.tagName(), ctx.input });
+                        if (res.output.isOk()) {
+                            ctx.input.index = res.index;
+                            stack.items.len += 1;
+                            stack.items.ptr[stack.items.len] = StackItem.init(p);
+                            stack.items.len += 1;
                         } else {
-                            stack.items.ptr[stack.items.len].res =
-                                Result.ok(
+                            stack.items.ptr[stack.items.len].visits = StackItem.max_visits;
+                            res = Result.ok(
                                 ctx.input.index,
-                                .{ top.res.index, prev.res.index },
+                                .{ index_stack.pop(), res.index },
                             );
                         }
                     }
@@ -1097,50 +1082,42 @@ pub const Pattern = union(enum) {
                 .opt => |p| {
                     if (top.visits == 0) {
                         stack.items.len += 1;
-                        stack.items.ptr[stack.items.len] = Item.init(
-                            p,
-                            Result.err(ctx.input.index),
-                        );
+                        stack.items.ptr[stack.items.len] = StackItem.init(p);
                         stack.items.len += 1;
+                        index_stack.appendAssumeCapacity(ctx.input.index);
                     } else if (top.visits == 1) {
-                        const prev = stack.items.ptr[stack.items.len + 1];
                         // debug("opt prev={} {s} top={} ctx={}\n", .{ prev.res.index, @tagName(prev.res.output), top.res.index, ctx.input });
-                        stack.items.ptr[stack.items.len].res = if (prev.res.output.isOk())
-                            prev.res
-                        else
-                            Result.ok(top.res.index, .{ top.res.index, top.res.index });
+                        const index = index_stack.pop();
+                        if (res.output.isErr()) {
+                            ctx.input.index = index;
+                            res = Result.ok(index, .{ index, index });
+                        } else ctx.input.index = res.index;
                     } else @panic("unreachable");
                 },
                 .not => |p| {
                     if (top.visits == 0) {
                         stack.items.len += 1;
-                        stack.items.ptr[stack.items.len] = Item.init(
-                            p,
-                            Result.err(ctx.input.index),
-                        );
+                        stack.items.ptr[stack.items.len] = StackItem.init(p);
                         stack.items.len += 1;
+                        index_stack.appendAssumeCapacity(ctx.input.index);
                     } else if (top.visits == 1) {
-                        const prev = stack.items.ptr[stack.items.len + 1];
                         // debug("not top={} prev={}\n", .{ top.res, prev.res });
-                        ctx.input.index = top.res.index;
-                        stack.items.ptr[stack.items.len].res = if (prev.res.output.isOk())
-                            Result.err(top.res.index)
+                        res = if (res.output.isOk())
+                            Result.err(ctx.input.index)
                         else
-                            Result.ok(top.res.index, .{ top.res.index, top.res.index });
-                        // debug("not res={s}\n", .{@tagName(stack.items.ptr[stack.items.len].res.output)});
+                            Result.ok(ctx.input.index, .{ ctx.input.index, ctx.input.index });
+                        ctx.input.index = index_stack.pop();
+                        // debug("not res={s}\n", .{@tagName(res.output)});
                     } else @panic("unreachable");
                 },
                 .amp => |p| {
                     if (top.visits == 0) {
                         stack.items.len += 1;
-                        stack.items.ptr[stack.items.len] = Item.init(
-                            p,
-                            Result.err(ctx.input.index),
-                        );
+                        stack.items.ptr[stack.items.len] = StackItem.init(p);
                         stack.items.len += 1;
+                        index_stack.appendAssumeCapacity(ctx.input.index);
                     } else if (top.visits == 1) {
-                        ctx.input.index = top.res.index;
-                        stack.items.ptr[stack.items.len].res = stack.items.ptr[stack.items.len + 1].res;
+                        ctx.input.index = index_stack.pop();
                     } else @panic("unreachable");
                 },
                 .memo => |m| {
@@ -1149,53 +1126,41 @@ pub const Pattern = union(enum) {
                             ctx.allocator,
                             .{ m.id, ctx.input.index },
                         );
-                        // if (gop.found_existing)
-                        //     debug("found existing memo entry\n", .{});
                         if (gop.found_existing) {
-                            stack.items.ptr[stack.items.len].res = gop.value_ptr.*;
+                            res = gop.value_ptr.*;
                             continue;
                         }
                         stack.items.len += 1;
-                        stack.items.ptr[stack.items.len] = Item.init(
-                            m.pat,
-                            Result.err(ctx.input.index),
-                        );
+                        stack.items.ptr[stack.items.len] = StackItem.init(m.pat);
                         stack.items.len += 1;
                     } else if (top.visits == 1) {
-                        const prev = stack.items.ptr[stack.items.len + 1];
-                        try ctx.memo.put(ctx.allocator, .{ m.id, top.res.index }, prev.res);
-                        ctx.input.index = prev.res.index;
-                        stack.items.ptr[stack.items.len].res = prev.res;
-                        stack.items.ptr[stack.items.len].visits = Item.max_visits;
+                        try ctx.memo.put(ctx.allocator, .{ m.id, index_stack.getLast() }, res);
+                        ctx.input.index = res.index;
+                        stack.items.ptr[stack.items.len].visits = StackItem.max_visits;
                     } else @panic("unreachable");
                 },
                 .cap => |cap| {
                     if (top.visits == 0) {
                         stack.items.len += 1;
-                        stack.items.ptr[stack.items.len] = Item.init(
-                            cap.pat,
-                            Result.err(ctx.input.index),
-                        );
+                        stack.items.ptr[stack.items.len] = StackItem.init(cap.pat);
                         stack.items.len += 1;
                     } else if (top.visits == 1) {
-                        const prev = stack.items.ptr[stack.items.len + 1];
-                        // debug("cap prev={}\n", .{prev.res});
-                        if (prev.res.output.isOk()) {
+                        // debug("cap res={}\n", .{res});
+                        if (res.output.isOk()) {
                             ctx.onCapture(
                                 ctx.rules[cap.id.rule].rule_name,
                                 cap.id,
-                                prev.res.output.data,
+                                res.output.data,
                             ) catch |e| {
-                                stack.items.ptr[stack.items.len].res = Result.errWith(top.res.index, e);
+                                res = Result.errWith(index_stack.getLast(), e);
                             };
                         }
-                        stack.items.ptr[stack.items.len].res = prev.res;
-                        ctx.input.index = top.res.index;
+                        ctx.input.index = index_stack.getLast();
                     } else @panic("unreachable");
                 },
             }
         }
-        return stack.items.ptr[0].res;
+        return res;
     }
 
     pub fn format(
