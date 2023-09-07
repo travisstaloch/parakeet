@@ -53,10 +53,10 @@ pub fn main() !void {
             0,
             file[1],
         );
-        if (r.output.isErr()) {
+        if (r.output.isErr() or r.index < file[1].len) {
             try stdout.print(
-                "parse {s} {s} index={}\n",
-                .{ r.output.tagName(), file[0], r.index },
+                "parse {s} {s} index={}/{}\n",
+                .{ r.output.tagName(), file[0], r.index, file[1].len },
             );
             errcount += 1;
         }
