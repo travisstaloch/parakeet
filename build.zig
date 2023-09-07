@@ -1,12 +1,15 @@
 const std = @import("std");
+const common = @import("src/common.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     const options = b.addOptions();
-    const max_stack_option = b.option(u16, "max-stack-size", "maximum parser stack size") orelse 256;
+    const max_stack_option = b.option(u16, "max-stack-size", "maximum parser stack size. only applies when -Drun-mode=stack.  defaults to 256.") orelse 256;
     options.addOption(u16, "max_stack_size", max_stack_option);
+    const run_mode_option = b.option(common.RunMode, "run-mode", "whether to use recursive or stack based run() method.  defaults to recursive.") orelse .recursive;
+    options.addOption(common.RunMode, "run_mode", run_mode_option);
 
     const parakeet_mod = b.addModule("parakeet", .{
         .source_file = .{ .path = "src/lib.zig" },
