@@ -15,24 +15,26 @@ zig-out/bin/main examples/peg.peg examples/peg.peg
 zig-out/bin/main examples/json.peg examples/twitter.json
 zig-out/bin/main examples/json_memo.peg examples/twitter.json
 
-set +x
-zig_files=$(find ../zig/lib -name "*.zig")
-set -x
+zig_files=""
+if [[ "$download" = false ]]; then
+  set +x
+  zig_files=$(find ../zig/lib -name "*.zig")
+  set -x
+fi
+
 declare -a modes=("recursive" "stack")
 for mode in "${modes[@]}"; do
   zig build $args -Doptimize=ReleaseFast -Drun-mode=$mode
   zig-out/bin/main examples/zig-grammar.y examples/AstGen.zig
   cp zig-out/bin/main zig-out/bin/main-$mode
   # zig-out/bin/main examples/zig-grammar.y $(find . -not \( -path ./junk -prune \) -name "*.zig")
-  set +x
-  zig-out/bin/main examples/zig-grammar.y $zig_files
-  set -x
+  if [[ "$download" = false ]]; then
+    set +x
+    zig-out/bin/main examples/zig-grammar.y $zig_files
+    set -x
+  fi
 done
 
-sudo ../poop/zig-out/bin/poop "zig-out/bin/main-recursive examples/zig-grammar.y examples/AstGen.zig" "zig-out/bin/main-stack examples/zig-grammar.y examples/AstGen.zig"
-
-if [[ "$download" = true ]]; then
-  rm examples/AstGen.zig
-  rm examples/twitter.json
+if [[ "$download" = false ]]; then
+  sudo ../poop/zig-out/bin/poop "zig-out/bin/main-recursive examples/zig-grammar.y examples/AstGen.zig" "zig-out/bin/main-stack examples/zig-grammar.y examples/AstGen.zig"
 fi
-
