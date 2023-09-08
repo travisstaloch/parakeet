@@ -61,23 +61,17 @@ test "negated char class matches not char class" {
     inline for (expecteds) |expected| {
         {
             ctx.input = pk.input(expected[0]);
-            // var ra: Ctx.Result = undefined;
-            // ctx.rules[0].pattern.run(Ctx, &ctx, &ra);
             const ra = try ctx.rules[0].pattern.run(Ctx, &ctx);
             // std.debug.print("negated={} r={} expected=({s},{})\n", .{ negated, r, expected[0], expected[1] });
             try testing.expect((ra.output.isOk() != (expected[1] == .ok)));
         }
         {
             ctx.input = pk.input(expected[0]);
-            // var rb: Ctx.Result = undefined;
-            // ctx.rules[1].pattern.run(Ctx, &ctx, &rb);
             const rb = try ctx.rules[1].pattern.run(Ctx, &ctx);
             try testing.expect((rb.output.isOk() == (expected[1] == .ok)));
         }
         {
             ctx.input = pk.input(expected[0]);
-            // var rc: Ctx.Result = undefined;
-            // ctx.rules[2].pattern.run(Ctx, &ctx, &rc);
             const rc = try ctx.rules[2].pattern.run(Ctx, &ctx);
             try testing.expect((rc.output.isOk() == (expected[1] == .ok)));
         }
@@ -338,4 +332,37 @@ test "json parser basic" {
         try testing.expect(r.output.isOk());
         // std.debug.print("{s}", .{ctx.input.s[r.output.data[0]..r.output.data[1]]});
     }
+}
+
+test "pattern.run_stack failures" {
+    // make sure the input '@This();' to the following peg fails as it should
+    // because its not a valid identifier.
+    const gtext =
+        \\line_comment <- '//' ![!/][^\n]* / '////' [^\n]*
+        \\skip <- ([ \n] / line_comment)*
+        \\hex <- [0-9a-fA-F]
+        \\hex_ <- '_'? hex
+        \\char_escape
+        \\    <- "\\x" hex hex
+        \\     / "\\u{" hex+ "}"
+        \\     / "\\" [nr\\t'"]
+        \\string_char
+        \\    <- char_escape
+        \\     / [^\\"\n]
+        \\STRINGLITERALSINGLE <- "\"" string_char* "\"" skip
+        \\IDENTIFIER
+        \\    <- !keyword [A-Za-z_] [A-Za-z0-9_]* skip
+        \\     / "@" STRINGLITERALSINGLE
+        \\keyword <- "addrspace"
+    ;
+    var arena = std.heap.ArenaAllocator.init(talloc);
+    defer arena.deinit();
+    const Ctx = pk.pattern.ParseContext(void, .{});
+    const g = try pk.peg.parseString(pk.peg.parsers.grammar, gtext, arena.allocator());
+    var ctx = try Ctx.init(.{
+        .allocator = arena.allocator(),
+        .mode = .optimized,
+    }, g);
+    const r = try pk.pattern.parse(Ctx, &ctx, ctx.ruleNameId("IDENTIFIER") orelse unreachable, "@This();");
+    try testing.expect(r.output.isErr());
 }
