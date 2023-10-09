@@ -2,6 +2,7 @@ set -xe
 download=true
 
 if [[ "$download" = true ]]; then
+  wget https://github.com/ziglang/zig-spec/raw/master/grammar/grammar.y -O examples/zig-grammar.y
   wget https://github.com/ziglang/zig/raw/master/src/AstGen.zig -O examples/AstGen.zig
   wget https://github.com/simdjson/simdjson/raw/master/jsonexamples/twitter.json -O examples/twitter.json
 fi
