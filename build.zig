@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
         const test_filter = b.option([]const u8, "test-filter", "");
         unit_tests.filter = test_filter;
         unit_tests.addModule("parakeet", parakeet_mod);
-        unit_tests.main_pkg_path = .{ .path = "." };
+        unit_tests.main_mod_path = .{ .path = "." };
         const install_test = b.addInstallArtifact(unit_tests, .{});
         const test_step = b.step("test", "Run unit tests");
         test_step.dependOn(&install_test.step);
