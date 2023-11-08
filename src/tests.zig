@@ -370,7 +370,7 @@ test "map" {
                 return @bitCast(ab);
             }
         }.func);
-        try testing.expectEqual(mem.readIntLittle(u16, "fo"), p.run(foobar, .{}).output.ok);
+        try testing.expectEqual(mem.readInt(u16, "fo", .little), p.run(foobar, .{}).output.ok);
     }
     {
         const p = comptime takeWhileFn(isdigit, .{ .min = 3 })
@@ -444,13 +444,13 @@ test "map" {
                 .discardR(ps.eos);
 
             const r = p.run(input(s), .{});
-            try testing.expectEqual(mem.readIntLittle(u32, s), r.output.ok);
+            try testing.expectEqual(mem.readInt(u32, s, .little), r.output.ok);
         }
         {
             const p = comptime str(s)
                 .map(pk.toIntBig(u32));
             const r = p.run(input(s), .{});
-            try testing.expectEqual(mem.readIntBig(u32, s), r.output.ok);
+            try testing.expectEqual(mem.readInt(u32, s, .big), r.output.ok);
         }
     }
     {

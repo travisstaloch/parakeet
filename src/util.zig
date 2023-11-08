@@ -21,8 +21,8 @@ pub fn eql(a: []const u8, b: []const u8) bool {
     var index: u32 = 0;
     while (true) : (index += size) {
         if (index + size >= len) break;
-        const ai = mem.readIntNative(U, a.ptr[index..][0..size]);
-        const bi = mem.readIntNative(U, b.ptr[index..][0..size]);
+        const ai = mem.readInt(U, a.ptr[index..][0..size], .little);
+        const bi = mem.readInt(U, b.ptr[index..][0..size], .little);
         if (ai != bi) return false;
     }
     return eqlNaive(a.ptr[index..len], b.ptr[index..len]);

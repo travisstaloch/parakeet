@@ -431,7 +431,7 @@ pub fn toIntLittle(comptime T: type) fn ([]const u8) ParseError!T {
         fn func(s: []const u8) ParseError!T {
             const n = @divExact(@typeInfo(T).Int.bits, 8);
             if (s.len < n) return error.ParseFailure;
-            return mem.readIntLittle(T, s[0..n]);
+            return mem.readInt(T, s[0..n], .little);
         }
     }.func;
 }
@@ -442,7 +442,7 @@ pub fn toIntBig(comptime T: type) fn ([]const u8) ParseError!T {
         fn func(s: []const u8) ParseError!T {
             const n = @divExact(@typeInfo(T).Int.bits, 8);
             if (s.len < n) return error.ParseFailure;
-            return mem.readIntBig(T, s[0..n]);
+            return mem.readInt(T, s[0..n], .big);
         }
     }.func;
 }
