@@ -102,7 +102,7 @@ pub const Type = blk: {
     const EnumField = std.builtin.Type.EnumField;
     var fields: []const EnumField = &.{};
     var i: usize = 0;
-    inline for (std.meta.declarations(parsers)) |decl| {
+    for (std.meta.declarations(parsers)) |decl| {
         if (std.ascii.isLower(decl.name[0])) {
             fields = fields ++ [1]EnumField{.{ .name = decl.name, .value = i }};
             i += 1;

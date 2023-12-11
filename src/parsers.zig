@@ -846,7 +846,7 @@ pub fn until(
                     return P.errWith(r1.input, r1.output.err, r1.resource);
                 const len = r1.input.index - i.index;
                 const s = i.sliceAssume(len);
-                var r2 = p.run(input(s), opts);
+                const r2 = p.run(input(s), opts);
                 // std.log.debug("until i={} r1={} r2={}", .{ i, r1, r2 });
                 return .{
                     .input = if (r2.output == .ok)

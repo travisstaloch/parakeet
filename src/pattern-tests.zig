@@ -122,7 +122,7 @@ test "pattern optimizations" {
         defer arena.deinit();
         const g = try pk.peg.parseString(pk.peg.parsers.grammar, input, arena.allocator());
         const Ctx = pk.pattern.ParseContext(void);
-        var ctx = try Ctx.init(.{ .allocator = arena.allocator() }, g);
+        const ctx = try Ctx.init(.{ .allocator = arena.allocator() }, g);
 
         try testing.expectEqual(pk.pattern.Pattern.Tag.eos, ctx.rules[0].pattern);
 
@@ -148,7 +148,7 @@ test "first sets, nullability, and follow sets" {
     defer arena.deinit();
     const g = try pk.peg.parseString(pk.peg.parsers.grammar, input, arena.allocator());
     const Ctx = pk.pattern.ParseContext(void);
-    var ctx = try Ctx.init(.{ .allocator = arena.allocator() }, g);
+    const ctx = try Ctx.init(.{ .allocator = arena.allocator() }, g);
     const rules = ctx.rules;
     try expectFormat("[(0-9;]", "{}", .{rules[0].first_set}); // Stmt
     try testing.expect(rules[0].nullability == .non_nullable);
