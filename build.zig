@@ -7,22 +7,21 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
 
     const parakeet_mod = b.addModule("parakeet", .{
-        .source_file = .{ .path = "src/lib.zig" },
-        .dependencies = &.{
+        .root_source_file = .{ .path = "src/lib.zig" },
+        .imports = &.{
             .{ .name = "build_options", .module = options.createModule() },
         },
     });
 
     { // tests
         const unit_tests = b.addTest(.{
-            .root_source_file = .{ .path = "src/tests.zig" },
+            .root_source_file = .{ .path = "tests.zig" },
             .target = target,
             .optimize = optimize,
         });
         const test_filter = b.option([]const u8, "test-filter", "");
         unit_tests.filter = test_filter;
-        unit_tests.addModule("parakeet", parakeet_mod);
-        unit_tests.main_mod_path = .{ .path = "." };
+        unit_tests.root_module.addImport("parakeet", parakeet_mod);
         const install_test = b.addInstallArtifact(unit_tests, .{});
         const test_step = b.step("test", "Run unit tests");
         test_step.dependOn(&install_test.step);
@@ -43,7 +42,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
-        example.addModule("parakeet", parakeet_mod);
+        example.root_module.addImport("parakeet", parakeet_mod);
         b.installArtifact(example);
         const run_cmd = b.addRunArtifact(example);
         run_cmd.step.dependOn(b.getInstallStep());
@@ -64,7 +63,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
-        exe.addModule("parakeet", parakeet_mod);
+        exe.root_module.addImport("parakeet", parakeet_mod);
         b.installArtifact(exe);
         const exe_run = b.addRunArtifact(exe);
         exe_run.step.dependOn(b.getInstallStep());

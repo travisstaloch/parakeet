@@ -20,11 +20,6 @@ const discardL = ps.discardL;
 const any = ps.any;
 const many = ps.many;
 
-test {
-    _ = @import("peg-tests.zig");
-    _ = @import("pattern-tests.zig");
-}
-
 /// runs 'p' and checks for end of stream afterward, succeeds when input is at end of stream
 pub fn eosAssert(comptime p: anytype) pk.ParserType(p) {
     const P = pk.ParserType(p);
