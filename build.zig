@@ -20,7 +20,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         const test_filter = b.option([]const u8, "test-filter", "");
-        unit_tests.filter = test_filter;
+        unit_tests.filters = if (test_filter) |tf|
+            b.allocator.dupe([]const u8, &.{tf}) catch @panic("OOM")
+        else
+            &.{};
         unit_tests.root_module.addImport("parakeet", parakeet_mod);
         const install_test = b.addInstallArtifact(unit_tests, .{});
         const test_step = b.step("test", "Run unit tests");
