@@ -541,7 +541,7 @@ pub fn Seq(comptime ps: anytype) type {
         else
             @Type(.{ .Struct = .{
                 .is_tuple = true,
-                .layout = .Auto,
+                .layout = .auto,
                 .fields = &fields,
                 .decls = &.{},
             } }), errset);

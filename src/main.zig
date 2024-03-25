@@ -9,7 +9,7 @@ fn nextArg(args: *[]const [:0]const u8) ?[:0]const u8 {
 
 fn usage(comptime fmt: []const u8, args: anytype) noreturn {
     std.debug.print(fmt ++ "\n", args);
-    std.os.exit(1);
+    std.process.exit(1);
 }
 
 pub fn main() !void {
@@ -99,5 +99,5 @@ pub fn main() !void {
         lines / 1024 / seconds,
     });
     std.debug.print("{s}\n", .{dashes});
-    if (errcount > 0) std.os.exit(1);
+    if (errcount > 0) std.process.exit(1);
 }
