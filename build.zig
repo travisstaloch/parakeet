@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
 
     const parakeet_mod = b.addModule("parakeet", .{
-        .root_source_file = .{ .path = "src/lib.zig" },
+        .root_source_file = b.path("src/lib.zig"),
         .imports = &.{
             .{ .name = "build_options", .module = options.createModule() },
         },
@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
 
     { // tests
         const unit_tests = b.addTest(.{
-            .root_source_file = .{ .path = "tests.zig" },
+            .root_source_file = b.path("tests.zig"),
             .target = target,
             .optimize = optimize,
         });
@@ -40,8 +40,8 @@ pub fn build(b: *std.Build) void {
         const example_file = b.option([]const u8, "example", "path to example file");
         const example = b.addExecutable(.{
             .name = "example",
-            .root_source_file = .{ .path = example_file orelse
-                "src/examples/main.zig" },
+            .root_source_file = b.path(example_file orelse
+                "src/examples/main.zig"),
             .target = target,
             .optimize = optimize,
         });
@@ -62,7 +62,7 @@ pub fn build(b: *std.Build) void {
     { // exe
         const exe = b.addExecutable(.{
             .name = "main",
-            .root_source_file = .{ .path = "src/main.zig" },
+            .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
         });

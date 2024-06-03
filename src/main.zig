@@ -55,8 +55,8 @@ pub fn main() !void {
         );
         if (r.output == .err) {
             try stdout.print(
-                "parse {s} {s} input={}\n",
-                .{ @tagName(r.output), file[0], r.input },
+                "parse error {s} at {}\n",
+                .{ file[0], r.input },
             );
             errcount += 1;
         }

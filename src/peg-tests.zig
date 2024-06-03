@@ -190,3 +190,49 @@ test "peg grammar" {
 test "peg capture" {
     try checkSame(pegps.grammar, "a <- 'a':0");
 }
+
+test "ContainerField" {
+    // TODO look into this further:
+    // $ zig build && zig-out/bin/main examples/zig-grammar.y examples/AstGen.zig
+    // parse error examples/AstGen.zig at 578/558501 '/// The se'
+    if (true) return;
+    const in =
+        \\ContainerField <- doc_comment? !KEYWORD_fn (IDENTIFIER COLON)? TypeExpr
+        \\doc_comment <- ('///' [^\n]* [ \n]* skip)+
+        \\KEYWORD_fn          <- 'fn'          end_of_word
+        \\end_of_word <- ![a-zA-Z0-9_] skip
+        \\skip <- ([ \n])*
+        \\IDENTIFIER
+        \\<- [A-Za-z_] [A-Za-z0-9_]* skip
+        \\ / "@" STRINGLITERALSINGLE
+        \\COLON                <- ':'                skip
+        \\TypeExpr <- PrefixTypeOp*
+        \\PrefixTypeOp <- '*'? "const"? IDENTIFIER ('.' IDENTIFIER)*
+        \\STRINGLITERALSINGLE <- "\"" string_char* "\"" skip
+        \\string_char
+        \\ <- char_escape
+        \\  / [^\\"\n]
+        \\char_escape
+        \\  <- "\\x" hex hex
+        \\   / "\\u{" hex+ "}"
+        \\   / "\\" [nr\\t'"]
+        \\ hex <- [0-9a-fA-F]
+        \\
+    ;
+    var arena = std.heap.ArenaAllocator.init(talloc);
+    defer _ = arena.deinit();
+    const g = try parseString(pegps.grammar, in, arena.allocator());
+    const Ctx = pk.pattern.ParseContext(void);
+    var ctx = try Ctx.init(.{ .allocator = arena.allocator() }, g);
+    const r = pk.pattern.parse(
+        Ctx,
+        &ctx,
+        0,
+        \\/// The set of nodes which, given the choice, must expose a result pointer to
+        \\/// sub-expressions. See `AstRlAnnotate` for details.
+        \\nodes_need_rl: *const AstRlAnnotate.RlNeededSet,
+        \\
+        ,
+    );
+    std.debug.print("{}\n", .{r});
+}
